@@ -1,0 +1,2 @@
+TESTS = 		\
+  module-mondemand_backend_stats_rrd
