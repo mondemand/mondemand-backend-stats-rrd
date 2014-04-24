@@ -1,0 +1,10 @@
+{ application, mondemand_backend_stats_rrd,
+  [
+    { description,"A plugin for the mondemand server to send stats to rrd"},
+    { vsn,"0.0.0"},
+    { modules,[]},
+    { registered,[]},
+    { applications, [kernel,stdlib]},
+    { env, [] }
+  ]
+}.
