@@ -1,3 +1,6 @@
+* Tue May 06 2014 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.1.1
+- add some requirements to app.src
+
 * Tue May 06 2014 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.1.0
 - use rrdcached batch interface and sidejob worker
 
