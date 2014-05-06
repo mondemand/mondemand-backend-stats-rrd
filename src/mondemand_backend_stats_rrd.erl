@@ -1,16 +1,24 @@
 -module (mondemand_backend_stats_rrd).
 
--include_lib ("lwes/include/lwes.hrl").
--include_lib ("kernel/include/file.hrl").
-
--behaviour (mondemand_server_backend).
 -behaviour (gen_server).
+-behaviour (mondemand_server_backend).
+-behaviour (mondemand_backend_stats_handler).
 
-%% mondemand_backend callbacks
+-export ([ update_cache/0 ]).
+
+%% mondemand_server_backend callbacks
 -export ([ start_link/1,
            process/1,
            stats/0,
            required_apps/0
+         ]).
+
+%% mondemand_backend_stats_handler callbacks
+-export ([ header/0,
+           separator/0,
+           format_stat/8,
+           footer/0,
+           handle_response/1
          ]).
 
 %% gen_server callbacks
@@ -22,114 +30,49 @@
            code_change/3
          ]).
 
--record (state, { config,
-                  root,
-                  context_delimiter,
+-record (state, { sidejob,
                   stats = dict:new ()
                 }).
+-define (TABLE, md_be_stats_rrd_filecache).
 
 %%====================================================================
-%% mondemand_backend callbacks
+%% mondemand_server_backend callbacks
 %%====================================================================
 start_link (Config) ->
   gen_server:start_link ( { local, ?MODULE }, ?MODULE, Config, []).
 
 process (Event) ->
-  gen_server:cast (?MODULE, {process, Event}).
+  mondemand_backend_connection_pool:cast (?MODULE, {process, Event}).
 
 stats () ->
   gen_server:call (?MODULE, {stats}).
 
 required_apps () ->
-  [ erlrrd ].
+  [ sidejob, afunix, erlrrd ].
 
 %%====================================================================
 %% gen_server callbacks
 %%====================================================================
 init (Config) ->
-  Dir = proplists:get_value (root, Config, "."),
-  Delimiter = proplists:get_value (context_delimiter, Config, "-"),
+  Limit = proplists:get_value (limit, Config, 10),
+  Number = proplists:get_value (number, Config, undefined),
+  Prefix = proplists:get_value (prefix, Config, "."),
 
-  mondemand_server_util:mkdir_p (Dir),
+  mondemand_server_util:mkdir_p (Prefix),
 
-  % initialize all stats to zero
-  InitialStats =
-    mondemand_server_util:initialize_stats ([ errors, processed ] ),
+  ets:new (?TABLE, [set, public, named_table, {keypos, 1}]),
 
-  { ok, #state {
-          config = Config,
-          root = filename:join (Dir),
-          context_delimiter = Delimiter,
-          stats = InitialStats
-        }
-  }.
+  { ok, Proc } =
+    mondemand_backend_connection_pool:init ([?MODULE, Limit, Number]),
+  { ok, #state { sidejob = Proc } }.
 
-handle_call ({stats}, _From,
-             State = #state { stats = Stats }) ->
+handle_call ({stats}, _From, State) ->
+  Stats = mondemand_backend_connection_pool:stats (?MODULE),
   { reply, Stats, State };
 handle_call (Request, From, State) ->
   error_logger:warning_msg ("~p : Unrecognized call ~p from ~p~n",
                             [?MODULE, Request, From]),
   { reply, ok, State }.
-
-handle_cast ({process, Binary},
-             State = #state { root = Dir,
-                              context_delimiter = Delimiter,
-                              stats = Stats }) ->
-  Event =  lwes_event:from_udp_packet (Binary, dict),
-  #lwes_event { attrs = Data } = Event,
-
-  SecsSinceEpoch =
-   case find (<<"ReceiptTime">>, Data, undefined) of
-     undefined -> mondemand_server_util:seconds_since_epoch ();
-     Timestamp -> trunc (Timestamp / 1000)
-   end,
-
-  Num = find (<<"num">>, Data, 0),
-  ProgId = find (<<"prog_id">>, Data, <<"unknown">>),
-  {Host, ContextString} =
-    mondemand_server_util:construct_context_string (Event, Delimiter),
-
-  % perform updates keeping track of number processed and number of errors
-  {TotalProcessed, TotalErrors} =
-    lists:foldl (
-      fun (E, {Processed, Errors}) ->
-        T = find (mondemand_server_util:stat_type(E), Data,<<"counter">>),
-        K = find (mondemand_server_util:stat_key(E), Data, <<"unknown">>),
-        V = find (mondemand_server_util:stat_val(E), Data, 1),
-        FileName = list_to_binary ([ProgId,"-",T,"-",K,"-",Host,
-                                    case ContextString of
-                                      [] -> [];
-                                      _ -> ["-",ContextString]
-                                    end,
-                                    ".rrd"]),
-        FilePath =
-          binary_to_list (
-            filename:join([Dir,
-                           ProgId,
-                           K,
-                           FileName
-                          ])
-          ),
-        case mondemand_server_util:mkdir_p (filename:join([Dir, ProgId, K])) of
-          ok ->
-             case update (FilePath, T, SecsSinceEpoch, V) of
-               ok -> { Processed + 1, Errors };
-               _ -> { Processed + 1, Errors + 1 }
-             end;
-          _ ->
-            { Processed + 1, Errors + 1 }
-        end
-      end,
-      {0, 0},
-      lists:seq (1,Num)),
-
-  NewStats =
-    mondemand_server_util:increment_stat (processed, TotalProcessed,
-      mondemand_server_util:increment_stat (errors, TotalErrors,
-        Stats)),
-
-  {noreply, State#state { stats = NewStats } };
 
 handle_cast (Request, State) ->
   error_logger:warning_msg ("~p : Unrecognized cast ~p~n",[?MODULE, Request]),
@@ -139,44 +82,90 @@ handle_info (Request, State) ->
   error_logger:warning_msg ("~p : Unrecognized info ~p~n",[?MODULE, Request]),
   {noreply, State}.
 
-terminate (_Reason, _State) ->
+terminate (_Reason, #state { }) ->
   ok.
 
 code_change (_OldVsn, State, _Extra) ->
   {ok, State}.
 
 %%====================================================================
-%% Internal
+%% mondemand_backend_stats_handler callbacks
 %%====================================================================
+header () -> "BATCH\n".
 
-find (Key, Data, Default) ->
-  case dict:find (Key, Data) of
-    error -> Default;
-    {ok, Val} -> Val
+separator () -> "\n".
+
+format_stat (Prefix, ProgId, Host,
+             MetricType, MetricName, MetricValue, Timestamp, Context) ->
+
+  RRDFilePath =
+    check_cache (Prefix,ProgId,MetricType,MetricName,Host,Context),
+  case RRDFilePath of
+    error -> error;
+    {ok, P} ->
+      [ "UPDATE ",P, io_lib:fwrite (" ~b:~b", [Timestamp,MetricValue])]
   end.
 
-% attempt an update, and return 0 if the update succeeds and 1 if it fails
-update (File, Type, Timestamp, Value) ->
-  case maybe_create (Type, File) of
-    { ok, _ } ->
-      case
-        erlrrd:update ([
-            io_lib:fwrite ("~s",[File]),
-            io_lib:fwrite (" ~b:~b", [Timestamp,Value])
-          ]) of
+footer () -> "\n.\n".
+
+handle_response (Response) ->
+  parse_response (Response).
+
+check_cache (Prefix, ProgId, MetricType, MetricName, Host, Context) ->
+  FileKey = {ProgId,MetricType,MetricName,Host,Context},
+  case ets:lookup (?TABLE, FileKey) of
+    [{_, FP}] ->
+      {ok, FP};
+    [] ->
+      ContextString =
+        case Context of
+          [] -> "";
+          L -> [ "-",
+                 mondemand_server_util:join ([[K,"=",V] || {K, V} <- L ], "-")
+               ]
+        end,
+
+      FileName = list_to_binary ([ProgId,
+                                  "-",MetricType,
+                                  "-",MetricName,
+                                  "-",Host,
+                                  ContextString,
+                                  ".rrd"]),
+      FilePath =
+        filename:join([Prefix,
+                       ProgId,
+                       MetricName]),
+
+      mondemand_server_util:mkdir_p (FilePath),
+
+      RRDFile = filename:join ([FilePath, FileName]),
+      case maybe_create (MetricType, RRDFile) of
         {ok, _} ->
-          ok;
-        Err ->
+          ets:insert (?TABLE, {FileKey, RRDFile}),
+          {ok, RRDFile};
+        {error, Error} ->
           error_logger:error_msg (
-            "Unable to update '~p:~p:~p:~p' because of ~p",
-            [File, Type, Timestamp, Value, Err]),
+            "Unable to create '~p' because of ~p",[RRDFile, Error]),
           error
-      end;
-    {error, Error} ->
-       error_logger:error_msg (
-        "Unable to create '~p' because of ~p",[File, Error]),
-      error
+      end
   end.
+
+update_cache () ->
+  % sometimes RRD's will be deleting if they are no longer being accessed,
+  % in those cases we want to remove it from the cache, so this will do
+  % that by maybe recreating it
+  ToDelete =
+    ets:foldl (fun ({Key,File}, Accum) ->
+                 case file:read_file_info (File) of
+                   {ok, _} -> Accum;  % already exists so keep it
+                   _ -> [Key|Accum]   % doesn't so add to the to delete list
+                 end
+               end,
+               [],
+               ?TABLE),
+  % actually peform the deletes
+  [ ets:delete (?TABLE, K) || K <- ToDelete ],
+  ok.
 
 maybe_create (Type, File) ->
   case file:read_file_info (File) of
@@ -211,13 +200,55 @@ create_gauge (File) ->
       " \"RRA:AVERAGE:0.5:1440:400\""
     ]).
 
-%%--------------------------------------------------------------------
-%%% Test functions
-%%--------------------------------------------------------------------
--ifdef(HAVE_EUNIT).
--include_lib("eunit/include/eunit.hrl").
--endif.
+parse_response (Response) ->
+  Lines = string:tokens (Response, "\n"),
+  Result = parse_lines (Lines,0),
+  case Result =/= 0 of
+    true ->
+      error_logger:error_msg ("~p : got errors ~p",[?MODULE, Result]);
+    false ->
+      ok
+  end,
+  Result.
 
--ifdef(EUNIT).
+parse_lines ([],Accum) ->
+  Accum;
+parse_lines ([Status|Rest],Accum) ->
+  Resp =
+    case parse_status_line (Status) of
+      {status, N, StatusMessage} when N < 0 ->
+        parse_status_message (StatusMessage);
+      {status, N, errors} when N > 0 ->
+        {ok, N, parse_rest (N, Rest)};
+      E ->
+        E
+    end,
+  case Resp of
+    {error, _} ->
+      parse_lines (Rest, Accum + 1);
+    {ok, Errs, RealRest} ->
+      parse_lines (RealRest, Accum + Errs);
+    _ ->
+      parse_lines (Rest, Accum)
+  end.
 
--endif.
+parse_status_message ("No such file: " ++ File) ->
+  {error, {no_file, File}};
+parse_status_message (Line) ->
+  {error, Line}.
+
+parse_rest (0, Rest) ->
+  Rest;
+parse_rest (N, [_|Rest]) ->
+  parse_rest (N - 1, Rest).
+
+parse_status_line (Status) ->
+  case string:to_integer (Status) of
+    {error, E} -> {error, {parse_status_line, E}};
+    {N, [32|R]} -> case R of
+                     "errors" -> {status, N, errors};
+                     _ -> {status, N, R}
+                   end 
+  end.
+
+

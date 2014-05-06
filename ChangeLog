@@ -1,2 +1,5 @@
+* Tue May 06 2014 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.1.0
+- use rrdcached batch interface and sidejob worker
+
 * Wed Sep 11 2013 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.0.0
 - initial version copied out of mondemand-server
