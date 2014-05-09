@@ -18,7 +18,7 @@
            separator/0,
            format_stat/8,
            footer/0,
-           handle_response/1
+           handle_response/2
          ]).
 
 %% gen_server callbacks
@@ -42,7 +42,13 @@ start_link (Config) ->
   gen_server:start_link ( { local, ?MODULE }, ?MODULE, Config, []).
 
 process (Event) ->
-  mondemand_backend_connection_pool:cast (?MODULE, {process, Event}).
+  case mondemand_backend_connection_pool:cast (?MODULE, {process, Event}) of
+    overload ->
+      error_logger:info_msg ("overloaded~n",[]),
+      overload;
+    O ->
+      O
+  end.
 
 stats () ->
   gen_server:call (?MODULE, {stats}).
@@ -108,8 +114,8 @@ format_stat (Prefix, ProgId, Host,
 
 footer () -> "\n.\n".
 
-handle_response (Response) ->
-  parse_response (Response).
+handle_response (Response, Previous) ->
+  parse_response (Response, Previous).
 
 check_cache (Prefix, ProgId, MetricType, MetricName, Host, Context) ->
   FileKey = {ProgId,MetricType,MetricName,Host,Context},
@@ -200,55 +206,83 @@ create_gauge (File) ->
       " \"RRA:AVERAGE:0.5:1440:400\""
     ]).
 
-parse_response (Response) ->
-  Lines = string:tokens (Response, "\n"),
-  Result = parse_lines (Lines,0),
-  case Result =/= 0 of
-    true ->
-      error_logger:error_msg ("~p : got errors ~p",[?MODULE, Result]);
-    false ->
-      ok
-  end,
-  Result.
 
-parse_lines ([],Accum) ->
-  Accum;
-parse_lines ([Status|Rest],Accum) ->
-  Resp =
-    case parse_status_line (Status) of
-      {status, N, StatusMessage} when N < 0 ->
-        parse_status_message (StatusMessage);
-      {status, N, errors} when N > 0 ->
-        {ok, N, parse_rest (N, Rest)};
-      E ->
-        E
+-record (parse_state, {errors = 0, expected = 0, remaining}).
+
+parse_response (Response, undefined) ->
+  parse_response (Response, #parse_state {});
+parse_response (Response, State = #parse_state { remaining = Remaining }) ->
+  StateOut =
+    case Remaining of
+      undefined ->
+        get_lines (Response, State);
+      _ ->
+        get_lines (Remaining ++ Response,
+                   State#parse_state { remaining = undefined })
     end,
-  case Resp of
-    {error, _} ->
-      parse_lines (Rest, Accum + 1);
-    {ok, Errs, RealRest} ->
-      parse_lines (RealRest, Accum + Errs);
+  { StateOut#parse_state.errors, StateOut#parse_state { errors = 0 } }.
+
+get_lines (Lines, State = #parse_state { errors = CurrentErrors,
+                                         expected = Expected }) ->
+  case get_line (Lines) of
+    {undefined, ""} ->
+      State#parse_state { remaining = undefined };
+    {undefined, Rest} ->
+      State#parse_state { remaining = Rest };
+    {Line, Rest} ->
+      { Errors, Expecting } =
+        case process_line (Line) of
+          {error, Message} ->
+            error_logger:error_msg ("~p",[Message]),
+            { 1, 0 };
+          {expecting, N} ->
+            { N, N };
+          ok ->
+            { 0, 0 }
+        end,
+      ExpectedOut =
+        case Expected =/= 0 of
+          true ->
+            error_logger:error_msg ("~p",[Line]),
+            Expected - 1;
+          false ->
+            Expecting
+        end,
+      get_lines (Rest, State#parse_state { errors = CurrentErrors + Errors,
+                                           expected = ExpectedOut })
+  end.
+
+get_line (Lines) ->
+  get_line (Lines, []).
+
+get_line ([], CurrentLine) ->
+  { undefined, lists:reverse (CurrentLine) };
+get_line ([$\n|Rest], CurrentLine) ->
+  {lists:reverse (CurrentLine), Rest};
+get_line ([Char|Remaining], CurrentLine) ->
+  get_line (Remaining, [Char|CurrentLine]).
+
+process_line (Line) ->
+  case parse_status_line (Line) of
+    {status, N, StatusMessage} when N < 0 ->
+      {error, parse_status_message (StatusMessage)};
+    {status, N, errors} when N > 0 ->
+      {expecting, N};
     _ ->
-      parse_lines (Rest, Accum)
+      ok
+  end.
+
+parse_status_line (Status) ->
+  case string:to_integer (Status) of
+    {error, E} -> {error, {parse_status_line, E}};
+    {N, [32|R]} ->
+      case R of
+        "errors" -> {status, N, errors};
+        _ -> {status, N, R}
+      end
   end.
 
 parse_status_message ("No such file: " ++ File) ->
   {error, {no_file, File}};
 parse_status_message (Line) ->
   {error, Line}.
-
-parse_rest (0, Rest) ->
-  Rest;
-parse_rest (N, [_|Rest]) ->
-  parse_rest (N - 1, Rest).
-
-parse_status_line (Status) ->
-  case string:to_integer (Status) of
-    {error, E} -> {error, {parse_status_line, E}};
-    {N, [32|R]} -> case R of
-                     "errors" -> {status, N, errors};
-                     _ -> {status, N, R}
-                   end 
-  end.
-
-
