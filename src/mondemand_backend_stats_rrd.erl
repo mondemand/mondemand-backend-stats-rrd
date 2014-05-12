@@ -149,9 +149,17 @@ check_cache (Prefix, ProgId, MetricType, MetricName, Host, Context) ->
         {ok, _} ->
           ets:insert (?TABLE, {FileKey, RRDFile}),
           {ok, RRDFile};
+        {timeout, Timeout} ->
+          error_logger:error_msg (
+            "Unable to create '~p' because of timeout ~p",[RRDFile, Timeout]),
+          error;
         {error, Error} ->
           error_logger:error_msg (
             "Unable to create '~p' because of ~p",[RRDFile, Error]),
+          error;
+        Unknown ->
+          error_logger:error_msg (
+            "Unable to create '~p' because of unknown ~p",[RRDFile, Unknown]),
           error
       end
   end.
