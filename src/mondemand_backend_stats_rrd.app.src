@@ -1,10 +1,10 @@
 { application, mondemand_backend_stats_rrd,
   [
     { description,"A plugin for the mondemand server to send stats to rrd via rrdcached"},
-    { vsn,"0.2.0"},
+    { vsn,"0.3.0"},
     { modules,[]},
     { registered,[]},
-    { applications, [kernel,stdlib,erlrrd,afunix,sidejob]},
+    { applications, [kernel,stdlib,erlrrd,afunix]},
     { env, [] }
   ]
 }.

@@ -1,3 +1,6 @@
+* Sat May 31 2014 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.3.0
+- provide json interface to browse rrd tree
+
 * Sat May 17 2014 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.2.0
 - update to match new behaviour
 
