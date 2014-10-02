@@ -1,3 +1,7 @@
+* Thu Oct 02 2014 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.4.0
+- sync the filename cache to disk when flushes occur and at shutdown, then
+load it at startup, makes restarts much faster
+
 * Sat May 31 2014 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.3.0
 - provide json interface to browse rrd tree
 

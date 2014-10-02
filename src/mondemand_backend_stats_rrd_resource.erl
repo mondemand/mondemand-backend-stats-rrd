@@ -161,7 +161,8 @@ list_files (Prefix, Dir) ->
           fun (E) -> lists:prefix (Prefix, E) end,
           AllFiles)
     end,
-  mochijson2:encode ([ [{ <<"label">>, list_to_binary (F)}]
+  mochijson2:encode ([ [{ <<"caption">>, list_to_binary (F)},
+                        { <<"value">>, list_to_binary (F) }]
                        || F <- lists:sort (FilteredByPrefix) ]).
 
 get_file (FilePath) ->

@@ -47,6 +47,8 @@ init ([Config]) ->
   mondemand_server_util:mkdir_p (Prefix),
 
   Number = proplists:get_value (number, Config, 16), % FIXME: replace default
+  FileNameCache =
+    proplists:get_value (file_cache, Config, "/tmp/file_name_cache.ets"),
 
   { ok,
     {
@@ -54,7 +56,7 @@ init ([Config]) ->
       [
         { mondemand_backend_stats_rrd_filecache,
           { mondemand_backend_stats_rrd_filecache, start_link,
-            []
+            [FileNameCache]
           },
           permanent,
           2000,

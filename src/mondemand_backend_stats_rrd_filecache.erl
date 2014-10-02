@@ -3,9 +3,9 @@
 -behaviour (gen_server).
 
 %% API
--export ([ start_link/0,
-           update_cache/0,
-           check_cache/6 ]).
+-export ([ start_link/1,
+           check_cache/6
+         ]).
 
 %% gen_server callbacks
 -export ([ init/1,
@@ -16,20 +16,44 @@
            code_change/3
          ]).
 
--record (state, { delay, interval }).
+-record (state, { delay, interval, file }).
 -define (TABLE, md_be_stats_rrd_filecache).
 
-start_link () ->
-  gen_server:start_link ({local, ?MODULE},?MODULE,[],[]).
+start_link (FileNameCacheFile) ->
+  gen_server:start_link ({local, ?MODULE},?MODULE,[[FileNameCacheFile]],[]).
+
+save_cache (File) ->
+  error_logger:info_msg ("saving file name cache to ~p",[File]),
+  ets:tab2file (?TABLE, File).
+
+load_cache (File) ->
+  case ets:file2tab (File) of
+    {ok, ?TABLE} -> true;
+    _ -> false
+  end.
 
 %%====================================================================
 %% gen_server callbacks
 %%====================================================================
-init ([]) ->
+init ([FileNameCacheFile]) ->
   Interval = 3600,         % flush each hour
   Delay = Interval * 1000, % delay is in milliseconds
-  ets:new (?TABLE, [set, public, named_table, {keypos, 1}]),
-  { ok, #state { delay = Delay, interval = Interval }, Delay }.
+
+  % so our terminate/2 always gets called
+  process_flag( trap_exit, true ),
+
+  % attempt to load the file cache from a file at startup
+  case load_cache (FileNameCacheFile) of
+    true -> ok;
+    false ->
+      % it it failed we'll recreate it
+      ets:new (?TABLE, [set, public, named_table, {keypos, 1}])
+  end,
+
+  { ok,
+    #state { delay = Delay, interval = Interval, file = FileNameCacheFile },
+    0 % cause cache refresh to happen on startup
+  }.
 
 handle_call (Request, From, State = #state { delay = Delay }) ->
   error_logger:warning_msg ("~p : Unrecognized call ~p from ~p~n",
@@ -40,14 +64,16 @@ handle_cast (Request, State = #state { delay = Delay }) ->
   error_logger:warning_msg ("~p : Unrecognized cast ~p~n",[?MODULE, Request]),
   { noreply, State, Delay }.
 
-handle_info (timeout, State = #state { delay = Delay }) ->
-  update_cache (),
+handle_info (timeout, State = #state { delay = Delay, file = File }) ->
+  update_cache (File),
   { noreply, State, Delay };
 handle_info (Request, State = #state { delay = Delay }) ->
   error_logger:warning_msg ("~p : Unrecognized info ~p~n",[?MODULE, Request]),
   { noreply, State, Delay }.
 
-terminate (_Reason, #state { }) ->
+terminate (_Reason, #state { file = File }) ->
+  % save a copy to disk
+  save_cache (File),
   ok.
 
 code_change (_OldVsn, State, _Extra) ->
@@ -102,7 +128,7 @@ check_cache (Prefix, ProgId, MetricType, MetricName, Host, Context) ->
       end
   end.
 
-update_cache () ->
+update_cache (FileNameCacheFile) ->
   error_logger:info_msg ("Flushing File Name Cache"),
   % sometimes RRD's will be deleting if they are no longer being accessed,
   % in those cases we want to remove it from the cache, so this will do
@@ -118,6 +144,8 @@ update_cache () ->
                ?TABLE),
   % actually peform the deletes
   [ ets:delete (?TABLE, K) || K <- ToDelete ],
+  % save a copy to disk after each flush
+  save_cache (FileNameCacheFile),
   ok.
 
 maybe_create (Type, File) ->
