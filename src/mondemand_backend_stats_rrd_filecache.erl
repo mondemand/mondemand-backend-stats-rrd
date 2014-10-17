@@ -160,6 +160,7 @@ maybe_create (Type, File) ->
   end.
 
 create_counter (File) ->
+  % creates an RRD file of 438120 bytes
   erlrrd:create ([
       io_lib:fwrite ("~s",[File]),
       " --step \"60\""
@@ -171,6 +172,7 @@ create_counter (File) ->
     ]).
 
 create_gauge (File) ->
+  % creates an RRD file of 438128 bytes
   erlrrd:create ([
       io_lib:fwrite ("~s",[File]),
       " --step \"60\""
