@@ -1,3 +1,8 @@
+* Wed Apr 01 2015 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.5.0
+- added recently made calls, for better error reporting
+- update handler according to changes in mondemand_server_stats_handler
+behaviour
+
 * Thu Oct 02 2014 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.4.0
 - sync the filename cache to disk when flushes occur and at shutdown, then
 load it at startup, makes restarts much faster
