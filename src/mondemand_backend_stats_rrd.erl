@@ -46,7 +46,9 @@ init ([Config]) ->
 
   mondemand_server_util:mkdir_p (Prefix),
 
-  Number = proplists:get_value (number, Config, 16), % FIXME: replace default
+  % default to one process per scheduler
+  Number = proplists:get_value (number, Config, erlang:system_info(schedulers)),
+
   FileNameCache =
     proplists:get_value (file_cache, Config, "/tmp/file_name_cache.ets"),
 
@@ -245,5 +247,12 @@ parse_status_message (Line) ->
       case string:to_float (TR) of
         {error, _} -> {error, Line};
         {T, _} -> {error, {line, N, trunc(T)}}
-      end
+      end;
+    % match " No such file: "
+    {_, [$\s,$N,$o,$\s,$s,$u,$c,$h,$\s,$f,$i,$l,$e,$:,$\s|File]} ->
+      {error, {no_file, File}};
+    % catches anything else
+    {N, Unknown} ->
+      error_logger:info_msg ("parse_status_message(~p) unrecognized",[Line]),
+      {error, {unknown, N, Unknown}}
   end.

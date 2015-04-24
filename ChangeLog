@@ -1,3 +1,6 @@
+* Fri Apr 24 2015 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.5.1
+- make sure parsing of error messages doesn't cause server crash
+
 * Wed Apr 01 2015 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.5.0
 - added recently made calls, for better error reporting
 - update handler according to changes in mondemand_server_stats_handler
