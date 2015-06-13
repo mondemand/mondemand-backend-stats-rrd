@@ -93,25 +93,54 @@ init ([Config]) ->
 %%====================================================================
 header () -> "BATCH\n".
 
-separator () -> "\n".
+separator () -> "".
 
-format_stat (Num, _Total, Prefix, ProgId, Host,
+format_stat (_Num, _Total, Prefix, ProgId, Host,
              MetricType, MetricName, MetricValue, Timestamp, Context) ->
 
-  RRDFilePath =
-    mondemand_backend_stats_rrd_filecache:check_cache
-      (Prefix,ProgId,MetricType,MetricName,Host,Context),
-  case RRDFilePath of
-    error -> error;
-    {ok, P} ->
-      mondemand_backend_stats_rrd_recent:add (Num, Timestamp,
-                                              ProgId, MetricType,
-                                              MetricName, MetricValue,
-                                              Host, Context),
-      [ "UPDATE ",P, io_lib:fwrite (" ~b:~b", [Timestamp,MetricValue])]
+  { RRDFilePaths, Errors } =
+    case MetricType of
+      statset ->
+        lists:mapfoldl (
+          fun ({SubType, SubTypeValue}, HasErrors) ->
+            case
+              mondemand_backend_stats_rrd_filecache:check_cache
+                (Prefix,ProgId,{MetricType, SubType},MetricName,Host,Context)
+            of
+              error -> { undefined, true };
+              {ok, P} -> { {P, SubTypeValue}, HasErrors }
+            end
+          end,
+          false,
+          mondemand_statsmsg:statset_to_list (MetricValue)
+        );
+      _ ->
+        case
+          mondemand_backend_stats_rrd_filecache:check_cache
+            (Prefix,ProgId,MetricType,MetricName,Host,Context)
+        of
+          error -> { undefined, true };
+          {ok, P} -> { [{P, MetricValue}], false }
+        end
+    end,
+
+  case Errors of
+    true -> error;
+    _ ->
+
+% NOTE: this no longer works with restructuring
+%      mondemand_backend_stats_rrd_recent:add (Num, Timestamp,
+%                                              ProgId, MetricType,
+%                                              MetricName, MetricValue,
+%                                              Host, Context),
+      [
+        [ "UPDATE ", P, io_lib:fwrite (" ~b:~b\n", [Timestamp,Value])]
+        || { P, Value }
+        <- RRDFilePaths
+      ]
   end.
 
-footer () -> "\n.\n".
+footer () -> ".\n".
 
 handle_response (Response, Previous) ->
   parse_response (Response, Previous).
@@ -154,12 +183,14 @@ get_lines (Lines, State = #parse_state { errors = CurrentErrors,
           true ->
             case parse_status_message (Line) of
               {error, {line, Index, Timestamp}} ->
-                case
-                  mondemand_backend_stats_rrd_recent:check (Index, Timestamp)
-                of
-                  error -> error_logger:error_msg ("Error 1 : ~p",[Line]);
-                  _ -> ok
-                end;
+                % TODO: better handling of this error type
+                error_logger:error_msg ("~p : ~p", [Index, Timestamp]);
+%                case
+%                  mondemand_backend_stats_rrd_recent:check (Index, Timestamp)
+%                of
+%                  error -> error_logger:error_msg ("Error 1 : ~p",[Line]);
+%                  _ -> ok
+%                end;
               _ ->
                 error_logger:error_msg ("Error 2 :~p",[Line]),
                 ok
