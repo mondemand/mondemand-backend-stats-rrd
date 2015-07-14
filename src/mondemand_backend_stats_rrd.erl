@@ -33,7 +33,7 @@ process (Event) ->
     (mondemand_backend_stats_rrd_worker_pool, Event).
 
 required_apps () ->
-  [ erlrrd ].
+  [ lager, erlrrd ].
 
 type () ->
   supervisor.
@@ -51,6 +51,10 @@ init ([Config]) ->
 
   FileNameCache =
     proplists:get_value (file_cache, Config, "/tmp/file_name_cache.ets"),
+  HostDir =
+    proplists:get_value (host_dir, Config, "md"),
+  AggregateDir =
+    proplists:get_value (aggregate_dir, Config, "agg"),
 
   { ok,
     {
@@ -58,7 +62,7 @@ init ([Config]) ->
       [
         { mondemand_backend_stats_rrd_filecache,
           { mondemand_backend_stats_rrd_filecache, start_link,
-            [FileNameCache]
+            [FileNameCache, HostDir, AggregateDir]
           },
           permanent,
           2000,
@@ -97,7 +101,6 @@ separator () -> "".
 
 format_stat (_Num, _Total, Prefix, ProgId, Host,
              MetricType, MetricName, MetricValue, Timestamp, Context) ->
-
   { RRDFilePaths, Errors } =
     case MetricType of
       statset ->
@@ -133,11 +136,13 @@ format_stat (_Num, _Total, Prefix, ProgId, Host,
 %                                              ProgId, MetricType,
 %                                              MetricName, MetricValue,
 %                                              Host, Context),
-      [
-        [ "UPDATE ", P, io_lib:fwrite (" ~b:~b\n", [Timestamp,Value])]
-        || { P, Value }
-        <- RRDFilePaths
-      ]
+      Res =
+        [
+          [ "UPDATE ", P, io_lib:fwrite (" ~b:~b\n", [Timestamp,Value])]
+          || { P, Value }
+          <- RRDFilePaths
+        ],
+      Res
   end.
 
 footer () -> ".\n".
@@ -182,9 +187,9 @@ get_lines (Lines, State = #parse_state { errors = CurrentErrors,
         case Expected =/= 0 of
           true ->
             case parse_status_message (Line) of
-              {error, {line, Index, Timestamp}} ->
+              {error, {line, _Index, _Timestamp}} ->
                 % TODO: better handling of this error type
-                error_logger:error_msg ("~p : ~p", [Index, Timestamp]);
+                error_logger:error_msg ("Error 1 : ~p", [Line]);
 %                case
 %                  mondemand_backend_stats_rrd_recent:check (Index, Timestamp)
 %                of

@@ -1,3 +1,6 @@
+* Mon Jul 13 2015 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.6.0
+- work in conjunction with aggregates and mostly do the right thing
+
 * Fri Apr 24 2015 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.5.1
 - make sure parsing of error messages doesn't cause server crash
 
