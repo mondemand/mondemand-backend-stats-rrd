@@ -22,10 +22,11 @@
 -define (TABLE, md_be_stats_rrd_filecache).
 
 start_link (FileNameCacheFile, HostDir, AggregateDir) ->
+  mondemand_global:put (md_be_rrd_dirs, {HostDir, AggregateDir}),
   gen_server:start_link ({local, ?MODULE},?MODULE,[FileNameCacheFile, HostDir, AggregateDir],[]).
 
 get_dirs () ->
-  gen_server:call (?MODULE, {get_dirs}).
+  mondemand_global:get (md_be_rrd_dirs).
 
 save_cache (File) ->
   error_logger:info_msg ("saving file name cache to ~p",[File]),
@@ -64,11 +65,6 @@ init ([FileNameCacheFile, HostDir, AggregateDir]) ->
     0 % cause cache refresh to happen on startup
   }.
 
-handle_call ({get_dirs}, _,
-             State = #state { host_dir = HostDir,
-                              aggregate_dir = AggregateDir,
-                              delay = Delay }) ->
-  { reply, {HostDir, AggregateDir}, State, Delay };
 handle_call (Request, From, State = #state { delay = Delay }) ->
   error_logger:warning_msg ("~p : Unrecognized call ~p from ~p~n",
                             [?MODULE, Request, From]),
@@ -211,7 +207,12 @@ check_cache (Prefix, ProgIdIn, MetricType,
                          MetricName, Host, Context),
 
       % TODO: check for error and don't create if it's there
-      mondemand_server_util:mkdir_p (GraphitePath),
+      case mondemand_server_util:mkdir_p (GraphitePath) of
+        ok -> ok;
+        E ->
+          error_logger:error_msg (
+            "Can't create graphite dir ~p: ~p",[GraphitePath, E])
+      end,
       mondemand_server_util:mkdir_p (FilePath),
 
       RRDFile = filename:join ([FilePath, FileName]),

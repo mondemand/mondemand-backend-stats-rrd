@@ -1,3 +1,6 @@
+* Thu Jul 30 2015 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.6.1
+- keep some config data in globals since gen_server can timeout
+
 * Mon Jul 13 2015 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.6.0
 - work in conjunction with aggregates and mostly do the right thing
 
