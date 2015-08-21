@@ -60,6 +60,15 @@ init ([Config]) ->
     {
       {one_for_one, 10, 10},
       [
+        { mondemand_backend_stats_rrd_builder,
+          { mondemand_backend_stats_rrd_builder, start_link,
+            []
+          },
+          permanent,
+          2000,
+          worker,
+          [ mondemand_backend_stats_rrd_builder]
+        },
         { mondemand_backend_stats_rrd_filecache,
           { mondemand_backend_stats_rrd_filecache, start_link,
             [FileNameCache, HostDir, AggregateDir]
@@ -68,13 +77,6 @@ init ([Config]) ->
           2000,
           worker,
           [ mondemand_backend_stats_rrd_filecache ]
-        },
-        { mondemand_backend_stats_rrd_recent,
-          { mondemand_backend_stats_rrd_recent, start_link, [] },
-          permanent,
-          2000,
-          worker,
-          [ mondemand_backend_stats_rrd_recent ]
         },
         { mondemand_backend_stats_rrd_worker_pool,
           { mondemand_backend_worker_pool_sup, start_link,
@@ -101,49 +103,32 @@ separator () -> "".
 
 format_stat (_Num, _Total, Prefix, ProgId, Host,
              MetricType, MetricName, MetricValue, Timestamp, Context) ->
-  { RRDFilePaths, Errors } =
+  RRDFilePaths =
     case MetricType of
       statset ->
-        lists:mapfoldl (
-          fun ({SubType, SubTypeValue}, HasErrors) ->
-            case
+        lists:map (
+          fun ({SubType, SubTypeValue}) ->
+            {ok, P} =
               mondemand_backend_stats_rrd_filecache:check_cache
-                (Prefix,ProgId,{MetricType, SubType},MetricName,Host,Context)
-            of
-              error -> { undefined, true };
-              {ok, P} -> { {P, SubTypeValue}, HasErrors }
-            end
+                (Prefix,ProgId,{MetricType, SubType},MetricName,Host,Context),
+            {P, SubTypeValue}
           end,
-          false,
           mondemand_statsmsg:statset_to_list (MetricValue)
         );
       _ ->
-        case
+        {ok, P} =
           mondemand_backend_stats_rrd_filecache:check_cache
-            (Prefix,ProgId,MetricType,MetricName,Host,Context)
-        of
-          error -> { undefined, true };
-          {ok, P} -> { [{P, MetricValue}], false }
-        end
+            (Prefix,ProgId,MetricType,MetricName,Host,Context),
+        [{P, MetricValue}]
     end,
 
-  case Errors of
-    true -> error;
-    _ ->
-
-% NOTE: this no longer works with restructuring
-%      mondemand_backend_stats_rrd_recent:add (Num, Timestamp,
-%                                              ProgId, MetricType,
-%                                              MetricName, MetricValue,
-%                                              Host, Context),
-      Res =
-        [
-          [ "UPDATE ", P, io_lib:fwrite (" ~b:~b\n", [Timestamp,Value])]
-          || { P, Value }
-          <- RRDFilePaths
-        ],
-      Res
-  end.
+  Res =
+    [
+      [ "UPDATE ", P, io_lib:fwrite (" ~b:~b\n", [Timestamp,Value])]
+      || { P, Value }
+      <- RRDFilePaths
+    ],
+  Res.
 
 footer () -> ".\n".
 
@@ -190,12 +175,18 @@ get_lines (Lines, State = #parse_state { errors = CurrentErrors,
               {error, {line, _Index, _Timestamp}} ->
                 % TODO: better handling of this error type
                 error_logger:error_msg ("Error 1 : ~p", [Line]);
+%                 ok;
 %                case
 %                  mondemand_backend_stats_rrd_recent:check (Index, Timestamp)
 %                of
 %                  error -> error_logger:error_msg ("Error 1 : ~p",[Line]);
 %                  _ -> ok
 %                end;
+              {error, filenametoolong} ->
+                error_logger:error_msg ("Filename too long");
+              {error, {no_file, File}} ->
+                mondemand_backend_stats_rrd_filecache:clear_path(File),
+                error_logger:error_msg ("Missing file ~p clearing cache",[File]);
               _ ->
                 error_logger:error_msg ("Error 2 :~p",[Line]),
                 ok
@@ -257,6 +248,8 @@ parse_status_line (Status) ->
 
 parse_status_message ("No such file: " ++ File) ->
   {error, {no_file, File}};
+parse_status_message ("stat failed with error 36.") ->
+  {error, filenametoolong};
 % Also from RRDCACHED manpage
 %
 % Command processing is finished when the client sends a dot (".") on
@@ -287,6 +280,9 @@ parse_status_message (Line) ->
     % match " No such file: "
     {_, [$\s,$N,$o,$\s,$s,$u,$c,$h,$\s,$f,$i,$l,$e,$:,$\s|File]} ->
       {error, {no_file, File}};
+    % match " stat failed with error 36."
+    {_, [$\s,$s,$t,$a,$t,$\s,$f,$a,$i,$l,$e,$d,$ ,$w,$i,$t,$h,$\s,$e,$r,$r,$o,$r,$\s,$3,$6,$.]} ->
+       {error, filenametoolong};
     % catches anything else
     {N, Unknown} ->
       error_logger:info_msg ("parse_status_message(~p) unrecognized",[Line]),
