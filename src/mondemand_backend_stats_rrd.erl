@@ -103,24 +103,34 @@ separator () -> "".
 
 format_stat (_Num, _Total, Prefix, ProgId, Host,
              MetricType, MetricName, MetricValue, Timestamp, Context) ->
-  RRDFilePaths =
+  { RRDFilePaths, Errors } =
     case MetricType of
       statset ->
-        lists:map (
-          fun ({SubType, SubTypeValue}) ->
-            {ok, P} =
-              mondemand_backend_stats_rrd_filecache:check_cache
-                (Prefix,ProgId,{MetricType, SubType},MetricName,Host,Context),
-            {P, SubTypeValue}
+        lists:foldl (
+          fun ({SubType, SubTypeValue}, {Good, Bad}) ->
+            case mondemand_backend_stats_rrd_filecache:check_cache
+                   (Prefix,ProgId,{MetricType, SubType},
+                    MetricName,Host,Context) of
+              {ok, P} -> { Good ++ [ {P, SubTypeValue} ], Bad };
+              {error, _} -> { Good, Bad + 1 }
+            end
           end,
+          {[], 0 },
           mondemand_statsmsg:statset_to_list (MetricValue)
         );
       _ ->
-        {ok, P} =
-          mondemand_backend_stats_rrd_filecache:check_cache
-            (Prefix,ProgId,MetricType,MetricName,Host,Context),
-        [{P, MetricValue}]
+        case mondemand_backend_stats_rrd_filecache:check_cache
+               (Prefix,ProgId,MetricType,MetricName,Host,Context) of
+          {ok, P} -> { [{P, MetricValue}], 0};
+          {error, _} -> { [], 1 }
+        end
     end,
+
+  case Errors > 0 of
+    false -> ok;
+    true ->
+      error_logger:error_msg ("~b errors found while formatting",[Errors])
+  end,
 
   Res =
     [
@@ -174,8 +184,8 @@ get_lines (Lines, State = #parse_state { errors = CurrentErrors,
             case parse_status_message (Line) of
               {error, {line, _Index, _Timestamp}} ->
                 % TODO: better handling of this error type
-                error_logger:error_msg ("Error 1 : ~p", [Line]);
-%                 ok;
+%                error_logger:error_msg ("Error 1 : ~p", [Line]);
+                 ok;
 %                case
 %                  mondemand_backend_stats_rrd_recent:check (Index, Timestamp)
 %                of

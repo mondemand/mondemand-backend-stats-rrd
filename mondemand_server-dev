@@ -21,7 +21,7 @@ getPid() {
 startRRDCached() {
   mkdir -p tmp/logs
   touch tmp/logs/rrdcached.log
-  rrdcached -b $cwd -l 127.0.0.1 -s apache -f 7200 -w 3600 -p tmp/var/run/mondemand/rrdcached.pid -l unix:tmp/var/run/mondemand/rrdcached.sock -g 2>&1 >> tmp/logs/rrdcached.log &
+  rrdcached -b $cwd -l 127.0.0.1:11211 -s apache -f 7200 -w 3600 -p tmp/var/run/mondemand/rrdcached.pid -l unix:tmp/var/run/mondemand/rrdcached.sock -g 2>&1 >> tmp/logs/rrdcached.log &
 }
 
 if test -f $pidfile ; then

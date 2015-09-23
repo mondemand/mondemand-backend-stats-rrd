@@ -1,6 +1,7 @@
 -module (mondemand_backend_stats_rrd_filecache).
 
 -behaviour (gen_server).
+-include_lib("kernel/include/file.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
 %% API
@@ -9,7 +10,13 @@
            check_cache/6,
            clear_path/1,
            save_cache/0,
-           update_cache/0
+           update_cache/0,
+           show_errors/0,
+           mark_error/2,
+           mark_created/1,
+           filename_to_key/1,
+           migrate_cache/1,
+           migrate_one/1
          ]).
 
 %% gen_server callbacks
@@ -46,6 +53,90 @@ save_cache (File) ->
   error_logger:info_msg ("saved file name cache to ~p in ~p millis",[File, ProcessMillis]),
   Result.
 
+migrate_cache (MillisPause) ->
+  File = gen_server:call(?MODULE,{cache_file}),
+  PreProcess = os:timestamp (),
+  migrate_all (MillisPause),
+  PostProcess = os:timestamp (),
+  ProcessMillis =
+    webmachine_util:now_diff_milliseconds (PostProcess, PreProcess),
+  error_logger:info_msg ("migrated file name cache (~p) in ~p millis",
+                         [File, ProcessMillis]),
+  ok.
+
+migrate_all (MillisPause) ->
+  First = ets:first (?TABLE),
+  migrate_one (First),
+  migate_until_end (MillisPause, First).
+
+migate_until_end (MillisPause, PrevKey) ->
+  case ets:next (?TABLE, PrevKey) of
+    '$end_of_table' -> ok;
+    Key ->
+      timer:sleep (MillisPause),
+      migrate_one (Key),
+      migate_until_end (MillisPause, Key)
+  end.
+
+mdyhms_to_epoch_seconds (DateTime) ->
+  EpochStartSeconds =
+    calendar:datetime_to_gregorian_seconds({{1970,1,1},{0,0,0}}),
+  DateTimeSeconds =
+    calendar:datetime_to_gregorian_seconds(DateTime),
+  DateTimeSeconds - EpochStartSeconds.
+
+file_mtime_in_seconds (File) ->
+  case file:read_file_info (File) of
+    {ok, #file_info { mtime = Mtime } } ->
+       {ok, mdyhms_to_epoch_seconds (Mtime)};
+    E -> E
+  end.
+
+migrate_one (Key) ->
+  case ets:lookup (?TABLE, Key) of
+    [{_,F}] ->
+      case file_mtime_in_seconds (F) of
+        {ok, Mtime} ->
+          ets:insert (?TABLE, {Key, F, created, Mtime}),
+          ok;
+        {error, E} ->
+          ets:insert (?TABLE, {Key, F, {error, E}, undefined}),
+          ok
+      end;
+    _ ->
+      ok
+  end.
+
+show_errors () ->
+  ets:select (?TABLE,
+              ets:fun2ms(fun({K,_,{error,E},_}) -> {K,E} end)).
+
+mark_error (FilenameOrKey, Error)  ->
+  error_logger:error_msg ("Failure ~p for Key ~p Blackholing",
+                          [Error, filename_to_key (FilenameOrKey)]),
+  update_state (FilenameOrKey, {error, Error}).
+mark_created (FilenameOrKey) ->
+  update_state (FilenameOrKey, created).
+
+filename_to_key (Key) when is_tuple (Key) ->
+  Key;
+filename_to_key (Filename) when is_list (Filename) ->
+  filename_to_key (list_to_binary (Filename));
+filename_to_key (Filename) when is_binary (Filename) ->
+  case ets:select(?TABLE,
+                  ets:fun2ms(fun({K,F,_,_}) when F =:= Filename -> K end)) of
+    [] -> undefined;
+    [O] -> O
+  end.
+
+update_state (Key, State) when is_tuple (Key) ->
+  ets:update_element (?TABLE, Key, {3, State});
+update_state (Filename, State) ->
+  case filename_to_key (Filename) of
+    undefined -> false;
+    Key -> update_state (Key, State)
+  end.
+
 update_cache () ->
   File = gen_server:call(?MODULE,{cache_file}),
   update_cache (File).
@@ -57,11 +148,17 @@ update_cache (FileNameCacheFile) ->
   % in those cases we want to remove it from the cache, so this will do
   % that by maybe recreating it
   ToDelete =
-    ets:foldl (fun ({Key,File}, Accum) ->
-                 case file:read_file_info (File) of
-                   {ok, _} -> Accum;  % already exists so keep it
-                   _ -> [Key|Accum]   % doesn't so add to the to delete list
-                 end
+    ets:foldl (fun
+                 ({Key,File}, Accum) ->
+                   case file:read_file_info (File) of
+                     {ok, _} -> Accum;  % already exists so keep it
+                     _ -> [Key|Accum]   % doesn't so add to the to delete list
+                   end;
+                 ({Key, File, _State, _Time}, Accum) ->
+                   case file:read_file_info (File) of
+                     {ok, _} -> Accum;  % already exists so keep it
+                     _ -> [Key|Accum]   % doesn't so add to the to delete list
+                   end
                end,
                [],
                ?TABLE),
@@ -137,7 +234,9 @@ handle_cast ({clear_path, Path}, State) when is_list (Path) ->
   handle_cast ({clear_path, list_to_binary(Path)}, State);
 handle_cast ({clear_path, Path}, State) ->
   ets:select_delete(?TABLE,
-    ets:fun2ms(fun({{_,_,_,_,_},F}) when F =:= Path -> true end)
+    ets:fun2ms(fun({{_,_,_,_,_},F}) when F =:= Path -> true;
+                  ({{_,_,_,_,_},F,_,_}) when F =:= Path -> true
+               end)
   ),
   { noreply, State};
 handle_cast (Request, State) ->
@@ -158,10 +257,20 @@ clear_path (Path) ->
   gen_server:cast (?MODULE, {clear_path, Path}).
 
 %% API
+%% return {ok, FilePath} or {error, Reason}
 check_cache (Prefix, ProgIdIn, MetricType,
              MetricNameIn, HostIn, ContextIn) ->
   FileKey = {ProgIdIn, MetricType, MetricNameIn, HostIn, ContextIn},
   case ets:lookup (?TABLE, FileKey) of
+    [{_, FP, created, _}] ->
+      {ok, FP};
+    [{_, _, State, _}] ->
+      case State of
+        creating -> {error, creating};
+        clearing -> {error, clearing};
+        {error, E} -> {error, E};
+        error -> {error, error}
+      end;
     [{_, FP}] ->
       {ok, FP};
     [] ->
@@ -172,6 +281,6 @@ check_cache (Prefix, ProgIdIn, MetricType,
       mondemand_backend_stats_rrd_builder:build (FullyQualifiedPrefix,
         ProgId, MetricType, MetricName, Host, Context, AggregatedType,
         FilePath, RRDFile),
-      ets:insert (?TABLE, {FileKey, RRDFile}),
+      ets:insert (?TABLE, {FileKey, RRDFile, creating, os:timestamp()}),
       {ok, RRDFile}
   end.

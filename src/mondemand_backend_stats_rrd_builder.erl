@@ -82,8 +82,15 @@ handle_cast ({build,FullyQualifiedPrefix, ProgId, MetricType,
                     MetricName, Host, Context, AggregatedType,
                     FilePath, RRDFile},
              State = #state {}) ->
-  ibuild(FullyQualifiedPrefix, ProgId, MetricType,
-         MetricName, Host, Context, AggregatedType, FilePath, RRDFile),
+  FileKey = {ProgId, MetricType, MetricName, Host, Context},
+  case
+    ibuild(FullyQualifiedPrefix, ProgId, MetricType,
+           MetricName, Host, Context, AggregatedType, FilePath, RRDFile) of
+      {ok, _} ->
+        mondemand_backend_stats_rrd_filecache:mark_created (FileKey);
+      E ->
+        mondemand_backend_stats_rrd_filecache:mark_error (FileKey, E)
+  end,
   {noreply, State};
 handle_cast (Request, State = #state {}) ->
   error_logger:warning_msg ("~p : Unrecognized cast ~p~n",[?MODULE, Request]),
@@ -127,44 +134,40 @@ legacy_rrd_path (Prefix, ProgId, MetricType, MetricName, Host, Context) ->
 
 ibuild (FullyQualifiedPrefix, ProgId, MetricType,
         MetricName, Host, Context, AggregatedType, FilePath, RRDFile) ->
-
   case mondemand_server_util:mkdir_p (FilePath) of
-    ok -> ok;
-    E2 ->
-      error_logger:error_msg (
-        "Can't create dir ~p: ~p",[FilePath, E2])
-  end,
+    ok ->
+      case maybe_create (MetricType, AggregatedType, RRDFile) of
+        {ok, _} ->
+          {GraphitePath, GraphiteFile} =
+            graphite_rrd_path (FullyQualifiedPrefix, ProgId, MetricType,
+                               MetricName, Host, Context,
+                               AggregatedType =/= undefined),
+          GRRDFile = filename:join ([GraphitePath, GraphiteFile]),
 
-  case maybe_create (MetricType, AggregatedType, RRDFile) of
-    {ok, _} ->
-      {GraphitePath, GraphiteFile} =
-        graphite_rrd_path (FullyQualifiedPrefix, ProgId, MetricType,
-                           MetricName, Host, Context,
-                           AggregatedType =/= undefined),
-      GRRDFile = filename:join ([GraphitePath, GraphiteFile]),
-
-      % TODO: check for error and don't create if it's there
-      case mondemand_server_util:mkdir_p (GraphitePath) of
-        ok -> ok;
-        E ->
+          % TODO: check for error and don't create if it's there
+          case mondemand_server_util:mkdir_p (GraphitePath) of
+            ok ->
+              % making symlinks for the moment
+              file:make_symlink (RRDFile, GRRDFile),
+              {ok, RRDFile};
+            E ->
+              {error, {cant_create_dir, GraphitePath, E}}
+          end;
+        {timeout, Timeout} ->
           error_logger:error_msg (
-            "Can't create graphite dir ~p: ~p",[GraphitePath, E])
-      end,
-      % making symlinks for the moment
-      file:make_symlink (RRDFile, GRRDFile),
-      {ok, RRDFile};
-    {timeout, Timeout} ->
-      error_logger:error_msg (
-        "Unable to create '~p' because of timeout ~p",[RRDFile, Timeout]),
-      error;
-    {error, Error} ->
-      error_logger:error_msg (
-        "Unable to create '~p' because of ~p",[RRDFile, Error]),
-      error;
-    Unknown ->
-      error_logger:error_msg (
-        "Unable to create '~p' because of unknown ~p",[RRDFile, Unknown]),
-      error
+            "Unable to create '~p' because of timeout ~p",[RRDFile, Timeout]),
+          {error, timeout};
+        {error, Error} ->
+          error_logger:error_msg (
+            "Unable to create '~p' because of ~p",[RRDFile, Error]),
+          {error, Error};
+        Unknown ->
+          error_logger:error_msg (
+            "Unable to create '~p' because of unknown ~p",[RRDFile, Unknown]),
+          {error, Unknown}
+      end;
+    E2 ->
+      {error, {cant_create_dir, FilePath, E2}}
   end.
 
 graphite_normalize_host (Host) ->
