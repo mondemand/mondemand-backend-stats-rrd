@@ -11,6 +11,7 @@
            clear_path/1,
            save_cache/0,
            update_cache/0,
+           clear_errors/0,
            show_errors/0,
            mark_error/2,
            mark_created/1,
@@ -110,6 +111,10 @@ migrate_one (Key) ->
 show_errors () ->
   ets:select (?TABLE,
               ets:fun2ms(fun({K,_,{error,E},_}) -> {K,E} end)).
+
+clear_errors () ->
+  ets:select_delete (?TABLE,
+                     ets:fun2ms (fun({_,_,{error,_},_}) -> true end)).
 
 mark_error (FilenameOrKey, Error)  ->
   error_logger:error_msg ("Failure ~p for Key ~p Blackholing",

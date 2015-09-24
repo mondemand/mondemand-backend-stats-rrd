@@ -2,6 +2,7 @@
 
 -behaviour (supervisor).
 -behaviour (mondemand_server_backend).
+-behaviour (mondemand_backend_worker).
 -behaviour (mondemand_backend_stats_handler).
 
 %% mondemand_server_backend callbacks
@@ -9,6 +10,14 @@
            process/1,
            required_apps/0,
            type/0
+         ]).
+
+%% mondemand_backend_worker callbacks
+-export ([ create/1,
+           connected/1,
+           connect/1,
+           send/2,
+           destroy/1
          ]).
 
 %% mondemand_backend_stats_handler callbacks
@@ -22,6 +31,14 @@
 %% supervisor callbacks
 -export ([init/1]).
 
+-define (POOL, md_rrd_pool).
+-record (state, { connection_config,
+                  send_timeout,
+                  recv_timeout,
+                  connect_timeout,
+                  connection
+                }).
+
 %%====================================================================
 %% mondemand_server_backend callbacks
 %%====================================================================
@@ -29,8 +46,7 @@ start_link (Config) ->
   supervisor:start_link ({local, ?MODULE}, ?MODULE, [Config]).
 
 process (Event) ->
-  mondemand_backend_worker_pool_sup:process
-    (mondemand_backend_stats_rrd_worker_pool, Event).
+  mondemand_backend_worker_pool_sup:process (?POOL, Event).
 
 required_apps () ->
   [ lager, erlrrd ].
@@ -78,12 +94,13 @@ init ([Config]) ->
           worker,
           [ mondemand_backend_stats_rrd_filecache ]
         },
-        { mondemand_backend_stats_rrd_worker_pool,
+        { ?POOL,
           { mondemand_backend_worker_pool_sup, start_link,
-            [ mondemand_backend_stats_rrd_worker_pool,
-              mondemand_backend_connection,
+            [ ?POOL,
+              mondemand_backend_worker,
               Number,
-              ?MODULE ]
+              ?MODULE
+            ]
           },
           permanent,
           2000,
@@ -95,15 +112,90 @@ init ([Config]) ->
   }.
 
 %%====================================================================
+%% mondemand_backend_worker callbacks
+%%====================================================================
+create (Config) ->
+  ConnectionConfig =
+    case proplists:get_value (path, Config, undefined) of
+      undefined ->
+        Host = proplists:get_value (host, Config, "127.0.0.1"),
+        Port = proplists:get_value (port, Config, 11211),
+        {Host, Port};
+      Path ->
+        Path
+    end,
+  ConnectTimeout = proplists:get_value (connect_timeout, Config, 1000),
+  SendTimeout = proplists:get_value (send_timeout, Config, 100),
+  RecvTimeout = proplists:get_value (recv_timeout, Config, 50),
+
+  {ok, #state { connection_config = ConnectionConfig,
+                connect_timeout = ConnectTimeout,
+                send_timeout = SendTimeout,
+                recv_timeout = RecvTimeout,
+                connection = undefined
+              }}.
+
+connected (#state { connection = undefined }) -> false;
+connected (_) -> true.
+
+connect (State = #state { connection_config = ConnectionConfig,
+                          connect_timeout = ConnectTimeout,
+                          send_timeout = SendTimeout,
+                          recv_timeout = RecvTimeout
+                        }) ->
+  case rrdcached_client:open (ConnectionConfig, ConnectTimeout,
+                              SendTimeout, RecvTimeout) of
+    {ok, Client} ->
+      {ok, State#state { connection = Client }};
+    Error ->
+      {Error, State}
+  end.
+
+send (State = #state {connection = Client0}, Data) ->
+  case rrdcached_client:batch_start (Client0) of
+    {Client1, ok} ->
+      case rrdcached_client:send_command (Client1, Data) of
+        {Client2, ok} ->
+          case rrdcached_client:batch_end (Client2) of
+            {NewC, {status,0,"errors\n"}} ->
+              {ok, State#state {connection = NewC}};
+            {NewC, {error, ErrorList}} ->
+              % mark all entries which had errors in the cache
+              [
+                case E of
+                  {error, no_file} -> true;
+                  _ ->
+                    mondemand_backend_stats_rrd_filecache:mark_error (
+                        rrdcached_client:file_from_command (C),
+                        E )
+                end
+                || {C, E}
+                <- ErrorList
+              ],
+              {ok, State#state {connection = NewC}};
+            {NewC, _} ->
+              {error, State#state {connection = NewC}}
+          end;
+        {NewClient2, _} ->
+          { error, State#state {connection = NewClient2} }
+      end;
+    {NewClient1, _} ->
+     {error, State#state {connection = NewClient1}}
+  end.
+
+destroy (#state {connection = Client}) ->
+  rrdcached_client:close (Client).
+
+%%====================================================================
 %% mondemand_backend_stats_handler callbacks
 %%====================================================================
-header () -> "BATCH\n".
+header () -> undefined.
 
-separator () -> "".
+separator () -> undefined.
 
 format_stat (_Num, _Total, Prefix, ProgId, Host,
              MetricType, MetricName, MetricValue, Timestamp, Context) ->
-  { RRDFilePaths, Errors } =
+  { RRDFilePaths, _Errors } =
     case MetricType of
       statset ->
         lists:foldl (
@@ -126,175 +218,23 @@ format_stat (_Num, _Total, Prefix, ProgId, Host,
         end
     end,
 
-  case Errors > 0 of
-    false -> ok;
-    true ->
-      error_logger:error_msg ("~b errors found while formatting",[Errors])
-  end,
-
   Res =
     [
-      [ "UPDATE ", P, io_lib:fwrite (" ~b:~b\n", [Timestamp,Value])]
+      begin
+        Update = lists:flatten (io_lib:fwrite ("~b:~b", [Timestamp,Value])),
+        rrdcached_client:update (P, Update)
+      end
       || { P, Value }
       <- RRDFilePaths
     ],
+%  case Errors > 0 of
+%    false -> ok;
+%    true ->
+%      error_logger:error_msg ("~b errors found while formatting",[Errors])
+%  end,
   Res.
 
-footer () -> ".\n".
+footer () -> undefined.
 
-handle_response (Response, Previous) ->
-  parse_response (Response, Previous).
-
--record (parse_state, {errors = 0, expected = 0, remaining}).
-
-parse_response (Response, undefined) ->
-  parse_response (Response, #parse_state {});
-parse_response (Response, State = #parse_state { remaining = Remaining }) ->
-  StateOut =
-    case Remaining of
-      undefined ->
-        get_lines (Response, State);
-      _ ->
-        get_lines (Remaining ++ Response,
-                   State#parse_state { remaining = undefined })
-    end,
-  { StateOut#parse_state.errors, StateOut#parse_state { errors = 0 } }.
-
-get_lines (Lines, State = #parse_state { errors = CurrentErrors,
-                                         expected = Expected }) ->
-  case get_line (Lines) of
-    {undefined, ""} ->
-      State#parse_state { remaining = undefined };
-    {undefined, Rest} ->
-      State#parse_state { remaining = Rest };
-    {Line, Rest} ->
-      { Errors, Expecting } =
-        case process_line (Line) of
-          {error, Message} ->
-            error_logger:error_msg ("~p",[Message]),
-            { 1, 0 };
-          {expecting, N} ->
-            { N, N };
-          ok ->
-            { 0, 0 }
-        end,
-      ExpectedOut =
-        case Expected =/= 0 of
-          true ->
-            case parse_status_message (Line) of
-              {error, {line, _Index, _Timestamp}} ->
-                % TODO: better handling of this error type
-%                error_logger:error_msg ("Error 1 : ~p", [Line]);
-                 ok;
-%                case
-%                  mondemand_backend_stats_rrd_recent:check (Index, Timestamp)
-%                of
-%                  error -> error_logger:error_msg ("Error 1 : ~p",[Line]);
-%                  _ -> ok
-%                end;
-              {error, filenametoolong} ->
-                error_logger:error_msg ("Filename too long");
-              {error, {no_file, File}} ->
-                mondemand_backend_stats_rrd_filecache:clear_path(File),
-                error_logger:error_msg ("Missing file ~p clearing cache",[File]);
-              _ ->
-                error_logger:error_msg ("Error 2 :~p",[Line]),
-                ok
-            end,
-            Expected - 1;
-          false ->
-            Expecting
-        end,
-      get_lines (Rest, State#parse_state { errors = CurrentErrors + Errors,
-                                           expected = ExpectedOut })
-  end.
-
-get_line (Lines) ->
-  get_line (Lines, []).
-
-get_line ([], CurrentLine) ->
-  { undefined, lists:reverse (CurrentLine) };
-get_line ([$\n|Rest], CurrentLine) ->
-  {lists:reverse (CurrentLine), Rest};
-get_line ([Char|Remaining], CurrentLine) ->
-  get_line (Remaining, [Char|CurrentLine]).
-
-% From RRDCACHED manpage
-% The daemon answers with a line consisting of a status code and a short
-% status message, separated by one or more space characters. A negative
-% status code signals an error, a positive status code or zero signal
-% success. If the status code is greater than zero, it indicates the
-% number of lines that follow the status line.
-%
-% Examples:
-%
-%   0 Success<LF>
-%
-%   2 Two lines follow<LF>
-%   This is the first line<LF>
-%   And this is the second line<LF>
-%
-process_line (Line) ->
-  case parse_status_line (Line) of
-    {status, N, StatusMessage} when N < 0 ->
-      {error, parse_status_message (StatusMessage)};
-    {status, N, errors} when N > 0 ->
-      {expecting, N};
-    _ ->
-      ok
-  end.
-
-parse_status_line (Status) ->
-  case string:to_integer (Status) of
-    {error, E} -> {error, {parse_status_line, E}};
-    % string:to_integer/1 returns {integer, Rest}, we then strip
-    % a SPACE (decimal value of 32), and check to see if there were errors
-    {N, [32|R]} ->
-      case R of
-        "errors" -> {status, N, errors};
-        _ -> {status, N, R}
-      end
-  end.
-
-parse_status_message ("No such file: " ++ File) ->
-  {error, {no_file, File}};
-parse_status_message ("stat failed with error 36.") ->
-  {error, filenametoolong};
-% Also from RRDCACHED manpage
-%
-% Command processing is finished when the client sends a dot (".") on
-% its own line.  After the client has finished, the server responds
-% with an error count and the list of error messages (if any).  Each
-% error messages indicates the number of the command to which it
-% corresponds, and the error message itself.  The first user command
-% after BATCH is command number one.
-%
-% client:  BATCH
-% server:  0 Go ahead.  End with dot '.' on its own line.
-% client:  UPDATE x.rrd 1223661439:1:2:3            <--- command #1
-% client:  UPDATE y.rrd 1223661440:3:4:5            <--- command #2
-% client:  and so on...
-% client:  .
-% server:  2 Errors
-% server:  1 message for command 1
-% server:  12 message for command 12
-parse_status_message (Line) ->
-  case string:to_integer (Line) of
-    {error, _} -> {error, Line};
-    % match " illegal attempt to update using time Timestamp "
-    {N, [$\s,$i,$l,$l,$e,$g,$a,$l,$\s,$a,$t,$t,$e,$m,$p,$t,$\s,$t,$o,$\s,$u,$p,$d,$a,$t,$e,$\s,$u,$s,$i,$n,$g,$\s,$t,$i,$m,$e,$\s|TR]} ->
-      case string:to_float (TR) of
-        {error, _} -> {error, Line};
-        {T, _} -> {error, {line, N, trunc(T)}}
-      end;
-    % match " No such file: "
-    {_, [$\s,$N,$o,$\s,$s,$u,$c,$h,$\s,$f,$i,$l,$e,$:,$\s|File]} ->
-      {error, {no_file, File}};
-    % match " stat failed with error 36."
-    {_, [$\s,$s,$t,$a,$t,$\s,$f,$a,$i,$l,$e,$d,$ ,$w,$i,$t,$h,$\s,$e,$r,$r,$o,$r,$\s,$3,$6,$.]} ->
-       {error, filenametoolong};
-    % catches anything else
-    {N, Unknown} ->
-      error_logger:info_msg ("parse_status_message(~p) unrecognized",[Line]),
-      {error, {unknown, N, Unknown}}
-  end.
+handle_response (_, _) ->
+  ok.

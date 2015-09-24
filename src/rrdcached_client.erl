@@ -17,7 +17,7 @@
          batch_end/1
         ]).
 
--export([open/5,
+-export([open/4,
          send/2,
          recv/1,
          close/1,
@@ -29,7 +29,8 @@
 -record (client, {socket,
                   recv_timeout,
                   in_batch = false,
-                  batch_lines = []
+                  batch_lines = [],
+                  type
                  }).
 
 -record (command, {action,
@@ -131,7 +132,7 @@ batch_end (Client = #client {in_batch = true}) ->
                        R),
           {FinalClient#client {batch_lines = []}, {error, Res}}
       end;
-    Other -> Other
+    {ErrorClient, Other}-> {ErrorClient#client { batch_lines = []}, Other}
   end.
 
 file_from_command (#command { file = File }) -> File.
@@ -168,27 +169,55 @@ recv_until_done (Client, N, Expected, A) ->
     ReceiveError -> {Client, {error, recv, ReceiveError, lists:reverse (A)}}
   end.
 
-open (Host, Port, ConnectTimeout, SendTimeout, RecvTimeout) ->
+
+open ({Host, Port}, ConnectTimeout, SendTimeout, RecvTimeout) ->
   case
     gen_tcp:connect (Host, Port,
                      [{mode, list}, {packet, line},
                       {active, false}, {keepalive, true},
-                      {send_timeout, SendTimeout}], ConnectTimeout) of
+                      {send_timeout, SendTimeout}], ConnectTimeout)
+  of
     {ok, Socket} ->
       {ok, #client {socket = Socket,
                     recv_timeout = RecvTimeout,
-                    in_batch = false}};
+                    in_batch = false,
+                    type = tcp
+                   }
+      };
+    E -> E
+  end;
+open (File, ConnectTimeout, SendTimeout, RecvTimeout) ->
+  case
+    afunix:connect (File,
+                    [{mode, list}, {packet, line},
+                     {active, false}, {keepalive, true},
+                     {send_timeout, SendTimeout}], ConnectTimeout)
+  of
+    {ok, Socket} ->
+      {ok, #client {socket = Socket,
+                    recv_timeout = RecvTimeout,
+                    in_batch = false,
+                    type = afunix
+                   }
+      };
     E -> E
   end.
 
-send (#client {socket = Socket}, Command) ->
-  gen_tcp:send (Socket, record_to_string (Command)).
+send (#client {socket = Socket, type = tcp}, Command) ->
+  gen_tcp:send (Socket, record_to_string (Command));
+send (#client {socket = Socket, type = afunix}, Command) ->
+  afunix:send (Socket, record_to_string (Command)).
 
-recv (#client {socket = Socket, recv_timeout = RecvTimeout}) ->
-  gen_tcp:recv (Socket, 0, RecvTimeout).
+recv (#client {socket = Socket, recv_timeout = RecvTimeout, type = tcp}) ->
+  gen_tcp:recv (Socket, 0, RecvTimeout);
+recv (#client {socket = Socket, recv_timeout = RecvTimeout, type = afunix}) ->
+  afunix:recv (Socket, 0, RecvTimeout).
 
 close (undefined) -> ok;
-close (#client {socket = Socket}) -> gen_tcp:close (Socket).
+close (#client {socket = Socket, type = tcp}) ->
+  gen_tcp:close (Socket);
+close (#client {socket = Socket, type = afunix}) ->
+  afunix:close (Socket).
 
 % From RRDCACHED manpage
 % The daemon answers with a line consisting of a status code and a short

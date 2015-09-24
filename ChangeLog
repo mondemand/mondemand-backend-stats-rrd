@@ -1,3 +1,6 @@
+* Thu Sep 24 2015 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.8.1
+- switched new rrdcached client to the afunix mode as it appears faster
+
 * Tue Sep 22 2015 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.8.0
 - reworked caching to keep track of state to prevent many calls to the
 rrdtool
