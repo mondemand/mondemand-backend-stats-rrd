@@ -195,7 +195,7 @@ separator () -> undefined.
 
 format_stat (_Num, _Total, Prefix, ProgId, Host,
              MetricType, MetricName, MetricValue, Timestamp, Context) ->
-  { RRDFilePaths, _Errors } =
+  { RRDFilePaths, Errors } =
     case MetricType of
       statset ->
         lists:foldl (
@@ -227,12 +227,7 @@ format_stat (_Num, _Total, Prefix, ProgId, Host,
       || { P, Value }
       <- RRDFilePaths
     ],
-%  case Errors > 0 of
-%    false -> ok;
-%    true ->
-%      error_logger:error_msg ("~b errors found while formatting",[Errors])
-%  end,
-  Res.
+  {ok, Res, length(Res), Errors}.
 
 footer () -> undefined.
 
