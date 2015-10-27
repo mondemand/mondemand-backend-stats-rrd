@@ -5,7 +5,10 @@
          pending/1,
          forget/1,
          stats/0,
-         update/2]).
+         update/2,
+         command_set_extra/2,
+         command_get_extra/1,
+         command_get_file/1]).
 
 -export([flush/2,
          flushall/1,
@@ -22,8 +25,7 @@
          recv/1,
          close/1,
          send_command/2,
-         record_to_string/1,
-         file_from_command/1
+         record_to_string/1
         ]).
 
 -record (client, {socket,
@@ -35,7 +37,9 @@
 
 -record (command, {action,
                    file,
-                   values}).
+                   values,
+                   extra
+                  }).
 
 record_to_string ([]) -> [];
 record_to_string (L) when is_list (L) ->
@@ -71,6 +75,7 @@ stats () -> #command { action = stats }.
 update (Filename, Value) -> #command { action = update, file = Filename, values = Value }.
 batch_start () -> #command {action = batch_start}.
 batch_end () -> #command {action = batch_end}.
+
 
 flush (Client, Filename) ->
   send_command (Client, flush (Filename)).
@@ -135,7 +140,11 @@ batch_end (Client = #client {in_batch = true}) ->
     {ErrorClient, Other}-> {ErrorClient#client { batch_lines = []}, Other}
   end.
 
-file_from_command (#command { file = File }) -> File.
+command_set_extra (Command = #command {}, Extra) ->
+  Command#command { extra = Extra }.
+command_get_extra (#command { extra = Extra }) -> Extra.
+
+command_get_file (#command { file = File }) -> File.
 
 send_command (Client = #client { in_batch = true, batch_lines = BatchLines },
               Command) ->
@@ -280,6 +289,10 @@ parse_error_line (ErrorLine) ->
 parse_status_message ("No such file or directory\n") ->
   {error, missing_file};
 parse_status_message ("No such file: " ++ _File) ->
+  {error, no_file};
+parse_status_message ("stat failed with error 111.\n") ->
+  % this is a very strange file, but I think should just result in removing
+  % from the cache
   {error, no_file};
 parse_status_message ("stat failed with error 36.\n") ->
   {error, filenametoolong};

@@ -163,10 +163,13 @@ send (State = #state {connection = Client0}, Data) ->
               % mark all entries which had errors in the cache
               [
                 case E of
-                  {error, no_file} -> true;
+                  {error, no_file} ->
+                    mondemand_backend_stats_rrd_filecache:delete_key (
+                      rrdcached_client:command_get_extra (C)
+                    ); 
                   _ ->
                     mondemand_backend_stats_rrd_filecache:mark_error (
-                        rrdcached_client:file_from_command (C),
+                        rrdcached_client:command_get_extra (C),
                         E )
                 end
                 || {C, E}
@@ -203,28 +206,44 @@ format_stat (_Num, _Total, Prefix, ProgId, Host,
             case mondemand_backend_stats_rrd_filecache:check_cache
                    (Prefix,ProgId,{MetricType, SubType},
                     MetricName,Host,Context) of
-              {ok, P} -> { Good ++ [ {P, SubTypeValue} ], Bad };
-              {error, _} -> { Good, Bad + 1 }
+              {ok, P, FK} -> { Good ++ [ {FK, P, SubTypeValue} ], Bad };
+              {error, E, FK} -> { Good, Bad ++ [{FK, E, SubTypeValue}] }
             end
           end,
-          {[], 0 },
+          {[], []},
           mondemand_statsmsg:statset_to_list (MetricValue)
         );
       _ ->
         case mondemand_backend_stats_rrd_filecache:check_cache
                (Prefix,ProgId,MetricType,MetricName,Host,Context) of
-          {ok, P} -> { [{P, MetricValue}], 0};
-          {error, _} -> { [], 1 }
+          {ok, P, FK} -> { [{FK, P, MetricValue}], [] };
+          {error, E, FK} -> { [], [{FK, E, MetricType}] }
         end
     end,
+
+  case Errors of
+    [] -> ok;
+    _ ->
+      [
+        case E of
+          {error, no_file} ->
+             mondemand_backend_stats_rrd_filecache:delete_key (FK); 
+          _ ->
+             mondemand_backend_stats_rrd_filecache:mark_error (FK, E)
+        end
+        || {FK, E, _}
+        <- Errors
+      ]
+  end,
 
   Res =
     [
       begin
         Update = lists:flatten (io_lib:fwrite ("~b:~b", [Timestamp,Value])),
-        rrdcached_client:update (P, Update)
+        C0 = rrdcached_client:update (Path, Update),
+        rrdcached_client:command_set_extra (C0, FileKey)
       end
-      || { P, Value }
+      || { FileKey, Path, Value }
       <- RRDFilePaths
     ],
   {ok, Res, length(Res), Errors}.

@@ -1,3 +1,7 @@
+* Tue Oct 27 2015 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.10.0
+- delete's and marking errors now don't require a full table scan.
+- the cache deals with files vanishing from the file system now.
+
 * Fri Oct 23 2015 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.9.0
 - track change to format_stats/10 in mondemand-server
 

@@ -8,7 +8,9 @@
 -export ([ start_link/3,
            get_dirs/0,
            check_cache/6,
+           key/5,
            clear_path/1,
+           delete_key/1,
            save_cache/0,
            update_cache/0,
            clear_errors/0,
@@ -115,6 +117,18 @@ show_errors () ->
 clear_errors () ->
   ets:select_delete (?TABLE,
                      ets:fun2ms (fun({_,_,{error,_},_}) -> true end)).
+
+clear_path (Path) when is_list (Path) ->
+  clear_path (list_to_binary (Path));
+clear_path (Path) ->
+  ets:select_delete(?TABLE,
+    ets:fun2ms(fun({{_,_,_,_,_},F}) when F =:= Path -> true;
+                  ({{_,_,_,_,_},F,_,_}) when F =:= Path -> true
+               end)
+  ).
+
+delete_key (Key) when is_tuple (Key) ->
+  ets:delete (?TABLE, Key).
 
 mark_error (FilenameOrKey, Error)  ->
   error_logger:error_msg ("Failure ~p for Key ~p Blackholing",
@@ -235,15 +249,6 @@ handle_call (Request, From, State) ->
                             [?MODULE, Request, From]),
   { reply, ok, State }.
 
-handle_cast ({clear_path, Path}, State) when is_list (Path) ->
-  handle_cast ({clear_path, list_to_binary(Path)}, State);
-handle_cast ({clear_path, Path}, State) ->
-  ets:select_delete(?TABLE,
-    ets:fun2ms(fun({{_,_,_,_,_},F}) when F =:= Path -> true;
-                  ({{_,_,_,_,_},F,_,_}) when F =:= Path -> true
-               end)
-  ),
-  { noreply, State};
 handle_cast (Request, State) ->
   error_logger:warning_msg ("~p : Unrecognized cast ~p~n",[?MODULE, Request]),
   { noreply, State }.
@@ -258,26 +263,27 @@ terminate (_Reason, #state { file = _File }) ->
 code_change (_OldVsn, State, _Extra) ->
   { ok, State }.
 
-clear_path (Path) ->
-  gen_server:cast (?MODULE, {clear_path, Path}).
+
+key (ProgId, MetricType, MetricName, Host, Context) ->
+  {ProgId, MetricType, MetricName, Host, Context}.
 
 %% API
-%% return {ok, FilePath} or {error, Reason}
+%% return {ok, FilePath, FileKey} or {error, Reason, FileKey}
 check_cache (Prefix, ProgIdIn, MetricType,
              MetricNameIn, HostIn, ContextIn) ->
-  FileKey = {ProgIdIn, MetricType, MetricNameIn, HostIn, ContextIn},
+  FileKey = key (ProgIdIn, MetricType, MetricNameIn, HostIn, ContextIn),
   case ets:lookup (?TABLE, FileKey) of
     [{_, FP, created, _}] ->
-      {ok, FP};
+      {ok, FP, FileKey};
     [{_, _, State, _}] ->
       case State of
-        creating -> {error, creating};
-        clearing -> {error, clearing};
-        {error, E} -> {error, E};
-        error -> {error, error}
+        creating -> {error, creating, FileKey};
+        clearing -> {error, clearing, FileKey};
+        {error, E} -> {error, E, FileKey};
+        error -> {error, error, FileKey}
       end;
     [{_, FP}] ->
-      {ok, FP};
+      {ok, FP, FileKey};
     [] ->
       {FullyQualifiedPrefix, ProgId, MetricName, Host, Context,
        AggregatedType, FilePath, RRDFile} =
@@ -287,5 +293,5 @@ check_cache (Prefix, ProgIdIn, MetricType,
         ProgId, MetricType, MetricName, Host, Context, AggregatedType,
         FilePath, RRDFile),
       ets:insert (?TABLE, {FileKey, RRDFile, creating, os:timestamp()}),
-      {ok, RRDFile}
+      {ok, RRDFile, FileKey}
   end.
