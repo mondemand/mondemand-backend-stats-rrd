@@ -246,7 +246,7 @@ format_stat (_Num, _Total, Prefix, ProgId, Host,
       || { FileKey, Path, Value }
       <- RRDFilePaths
     ],
-  {ok, Res, length(Res), Errors}.
+  {ok, Res, length(Res), length(Errors)}.
 
 footer () -> undefined.
 
