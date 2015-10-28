@@ -1,3 +1,9 @@
+* Wed Oct 28 2015 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.10.2
+- files being created or cleared should not be blackholed
+
+* Tue Oct 27 2015 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.10.1
+- errors from format_stat/10 needs to be a number
+
 * Tue Oct 27 2015 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.10.0
 - delete's and marking errors now don't require a full table scan.
 - the cache deals with files vanishing from the file system now.
