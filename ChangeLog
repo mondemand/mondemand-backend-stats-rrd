@@ -1,3 +1,6 @@
+* Wed Oct 28 2015 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.10.2
+- files being created or cleared should not be blackholed
+
 * Tue Oct 27 2015 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.10.1
 - errors from format_stat/10 needs to be a number
 

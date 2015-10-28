@@ -226,8 +226,11 @@ format_stat (_Num, _Total, Prefix, ProgId, Host,
     _ ->
       [
         case E of
-          {error, no_file} ->
-             mondemand_backend_stats_rrd_filecache:delete_key (FK); 
+          % these are not really errors, so no action is necessary for them
+          C when C =:= creating; C =:= clearing ->
+            ok;
+          no_file ->
+             mondemand_backend_stats_rrd_filecache:delete_key (FK);
           _ ->
              mondemand_backend_stats_rrd_filecache:mark_error (FK, E)
         end
