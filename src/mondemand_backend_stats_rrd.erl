@@ -169,8 +169,9 @@ send (State = #state {connection = Client0}, Data) ->
                     ); 
                   _ ->
                     mondemand_backend_stats_rrd_filecache:mark_error (
-                        rrdcached_client:command_get_extra (C),
-                        E )
+                      rrdcached_client:command_get_extra (C),
+                      E
+                    )
                 end
                 || {C, E}
                 <- ErrorList
@@ -225,14 +226,13 @@ format_stat (_Num, _Total, Prefix, ProgId, Host,
     [] -> ok;
     _ ->
       [
+        % the only error we care about is missing file at which point we
+        % remove the key from the cache
         case E of
-          % these are not really errors, so no action is necessary for them
-          C when C =:= creating; C =:= clearing ->
-            ok;
-          no_file ->
-             mondemand_backend_stats_rrd_filecache:delete_key (FK);
+          {error, no_file} ->
+            mondemand_backend_stats_rrd_filecache:delete_key (FK);
           _ ->
-             mondemand_backend_stats_rrd_filecache:mark_error (FK, E)
+            ok
         end
         || {FK, E, _}
         <- Errors

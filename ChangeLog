@@ -1,3 +1,6 @@
+* Tue Nov 17 2015 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.10.3
+- issue with order on cache updates was leading to continuous spurious logging
+
 * Wed Oct 28 2015 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.10.2
 - files being created or cleared should not be blackholed
 
