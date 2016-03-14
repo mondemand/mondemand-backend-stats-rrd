@@ -289,9 +289,13 @@ check_cache (Prefix, ProgIdIn, MetricType,
        AggregatedType, FilePath, RRDFile} =
         mondemand_backend_stats_rrd_builder:rrdfilename
           (Prefix, ProgIdIn, MetricType, MetricNameIn, HostIn, ContextIn),
+      % mark as being created
+      ets:insert (?TABLE, {FileKey, RRDFile, creating, os:timestamp()}),
+      % then create
       mondemand_backend_stats_rrd_builder:build (FullyQualifiedPrefix,
         ProgId, MetricType, MetricName, Host, Context, AggregatedType,
         FilePath, RRDFile),
-      ets:insert (?TABLE, {FileKey, RRDFile, creating, os:timestamp()}),
-      {ok, RRDFile, FileKey}
+      % and return to caller that we are creating so no writes are attempted
+      % until it's created
+      {error, creating, FileKey}
   end.
