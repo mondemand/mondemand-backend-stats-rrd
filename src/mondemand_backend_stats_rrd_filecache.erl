@@ -5,7 +5,7 @@
 -include_lib("stdlib/include/ms_transform.hrl").
 
 %% API
--export ([ start_link/3,
+-export ([ start_link/4,
            get_dirs/0,
            check_cache/6,
            key/5,
@@ -34,8 +34,9 @@
 -record (state, { delay, interval, timer, file, host_dir, aggregate_dir }).
 -define (TABLE, md_be_stats_rrd_filecache).
 
-start_link (FileNameCacheFile, HostDir, AggregateDir) ->
+start_link (FileNameCacheFile, HostDir, AggregateDir, ErrorTimeout) ->
   mondemand_global:put (md_be_rrd_dirs, {HostDir, AggregateDir}),
+  mondemand_global:put(error_timeout, ErrorTimeout),
   gen_server:start_link ({local, ?MODULE},?MODULE,
                          [FileNameCacheFile, HostDir, AggregateDir],[]).
 
@@ -114,6 +115,9 @@ show_errors () ->
   ets:select (?TABLE,
               ets:fun2ms(fun({K,_,{error,E},_}) -> {K,E} end)).
 
+clear_error(FileKey) ->
+  ets:delete(?TABLE, FileKey).
+
 clear_errors () ->
   ets:select_delete (?TABLE,
                      ets:fun2ms (fun({_,_,{error,_},_}) -> true end)).
@@ -131,9 +135,10 @@ delete_key (Key) when is_tuple (Key) ->
   ets:delete (?TABLE, Key).
 
 mark_error (FilenameOrKey, Error)  ->
-  error_logger:error_msg ("Failure ~p for Key ~p Blackholing",
-                          [Error, filename_to_key (FilenameOrKey)]),
-  update_state (FilenameOrKey, {error, Error}).
+  ErrorDuration = mondemand_global:get(error_timeout),
+  error_logger:error_msg ("Failure ~p for Key ~p, placing in error state for ~p seconds.",
+                          [Error, filename_to_key (FilenameOrKey), ErrorDuration]),
+  update_state_and_timestamp(FilenameOrKey, {error, Error}).
 mark_created (FilenameOrKey) ->
   update_state (FilenameOrKey, created).
 
@@ -147,6 +152,14 @@ filename_to_key (Filename) when is_binary (Filename) ->
     [] -> undefined;
     [O] -> O
   end.
+
+update_state_and_timestamp(Key, State) when is_tuple (Key) ->
+    ets:update_element(?TABLE, Key, [{3, State}, {4, os:timestamp()}]);
+update_state_and_timestamp(Filename, State) ->
+    case filename_to_key (Filename) of
+        undefined -> false;
+        Key -> update_state_and_timestamp(Key, State)
+    end.
 
 update_state (Key, State) when is_tuple (Key) ->
   ets:update_element (?TABLE, Key, {3, State});
@@ -267,20 +280,33 @@ code_change (_OldVsn, State, _Extra) ->
 key (ProgId, MetricType, MetricName, Host, Context) ->
   {ProgId, MetricType, MetricName, Host, Context}.
 
+check_error_timeout(Timestamp, CurrentTimestamp) ->
+    %% True if error timeout elapsed, False otherwise
+    mondemand_util:now_to_epoch_secs(CurrentTimestamp) - mondemand_util:now_to_epoch_secs(Timestamp)
+        >= mondemand_global:get(error_timeout).
+
+check_error_duration(Key, Error, Timestamp, CurrentTimestamp) ->
+    case check_error_timeout(Timestamp, CurrentTimestamp) of
+        true -> error_logger:info_msg('Clearing error for ~p.', [Key]),
+                clear_error(Key),
+                {error, clearing, Key};
+        false -> {error, Error, Key}
+    end.
+
 %% API
 %% return {ok, FilePath, FileKey} or {error, Reason, FileKey}
 check_cache (Prefix, ProgIdIn, MetricType,
              MetricNameIn, HostIn, ContextIn) ->
   FileKey = key (ProgIdIn, MetricType, MetricNameIn, HostIn, ContextIn),
+  CurrentTimestamp = os:timestamp(),
   case ets:lookup (?TABLE, FileKey) of
-    [{_, FP, created, _}] ->
-      {ok, FP, FileKey};
-    [{_, _, State, _}] ->
+    [{_, FP, State, Timestamp}] ->
       case State of
+        created -> {ok, FP, FileKey};
         creating -> {error, creating, FileKey};
         clearing -> {error, clearing, FileKey};
-        {error, E} -> {error, E, FileKey};
-        error -> {error, error, FileKey}
+        {error, E} -> check_error_duration(FileKey, E, Timestamp, CurrentTimestamp);
+        error -> check_error_duration(FileKey, error, Timestamp, CurrentTimestamp)
       end;
     [{_, FP}] ->
       {ok, FP, FileKey};
@@ -290,7 +316,7 @@ check_cache (Prefix, ProgIdIn, MetricType,
         mondemand_backend_stats_rrd_builder:rrdfilename
           (Prefix, ProgIdIn, MetricType, MetricNameIn, HostIn, ContextIn),
       % mark as being created
-      ets:insert (?TABLE, {FileKey, RRDFile, creating, os:timestamp()}),
+      ets:insert (?TABLE, {FileKey, RRDFile, creating, CurrentTimestamp}),
       % then create
       mondemand_backend_stats_rrd_builder:build (FullyQualifiedPrefix,
         ProgId, MetricType, MetricName, Host, Context, AggregatedType,
