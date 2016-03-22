@@ -71,6 +71,8 @@ init ([Config]) ->
     proplists:get_value (host_dir, Config, "md"),
   AggregateDir =
     proplists:get_value (aggregate_dir, Config, "agg"),
+  ErrorDuration =
+    proplists:get_value(error_timeout, Config, 300),
 
   { ok,
     {
@@ -87,7 +89,7 @@ init ([Config]) ->
         },
         { mondemand_backend_stats_rrd_filecache,
           { mondemand_backend_stats_rrd_filecache, start_link,
-            [FileNameCache, HostDir, AggregateDir]
+            [FileNameCache, HostDir, AggregateDir, ErrorDuration]
           },
           permanent,
           2000,
