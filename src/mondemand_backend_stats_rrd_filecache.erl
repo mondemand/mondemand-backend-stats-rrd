@@ -19,7 +19,9 @@
            mark_created/1,
            filename_to_key/1,
            migrate_cache/1,
-           migrate_one/1
+           migrate_one/1,
+           print_stats/0,
+           state_stats/0
          ]).
 
 %% gen_server callbacks
@@ -211,7 +213,16 @@ load_cache (File) ->
   PreProcess = os:timestamp (),
   Result =
     case ets:file2tab (File) of
-      {ok, ?TABLE} -> true;
+      {ok, ?TABLE} ->
+        % in some cases if the server is restarted after a cache file has been
+        % written but while the builder is still building, cache entries can
+        % be left in the creating state, and so will never receive updates, so
+        % on startup, just remove all those entries
+        error_logger:info_msg ("start clearing inflight data from cache"),
+        ets:select_delete (?TABLE,
+                           ets:fun2ms(fun({_,_,creating,_}) -> true end)),
+        error_logger:info_msg ("done clearing inflight data from cache"),
+        true;
       Error ->
         error_logger:error_msg (
           "failed to load file name cache from ~p because ~p",[File, Error]),
@@ -223,6 +234,25 @@ load_cache (File) ->
   error_logger:info_msg ("loaded file name cache from ~p in ~p millis",
                          [File, ProcessMillis]),
   Result.
+
+print_stats() ->
+  [ io:format ("~-8s : ~b~n",[atom_to_list(K), V]) || {K,V} <- state_stats() ],
+  ok.
+
+state_stats() ->
+  [ { created,
+      ets:select_count (?TABLE, ets:fun2ms(fun({_,_,created,_}) -> true end))
+    },
+    { error,
+      ets:select_count (?TABLE, ets:fun2ms(fun({_,_,{error,_},_}) -> true end))
+    },
+    { creating,
+      ets:select_count (?TABLE, ets:fun2ms(fun({_,_,creating,_}) -> true end))
+    },
+    { clearing,
+      ets:select_count (?TABLE, ets:fun2ms(fun({_,_,clearing,_}) -> true end))
+    }
+  ].
 
 %%====================================================================
 %% gen_server callbacks

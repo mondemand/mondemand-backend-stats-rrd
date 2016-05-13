@@ -1,3 +1,6 @@
+* Fri May 13 2016 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.12.0
+- clear cache entries in creating state when reading cache file at startup
+
 * Thu May 12 2016 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.11.1
 - update deps
 
