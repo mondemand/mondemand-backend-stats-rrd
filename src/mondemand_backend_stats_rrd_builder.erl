@@ -36,7 +36,7 @@ rrdfilename (Prefix, ProgIdIn, MetricType, MetricNameIn, HostIn, ContextIn) ->
   MetricName = mondemand_util:binaryify (MetricNameIn),
   Host = mondemand_util:binaryify (HostIn),
   Context = [ {mondemand_util:binaryify(K), mondemand_util:binaryify(V) }
-              || {K, V} <- ContextIn ],
+              || {K, V} <- lists:sort (ContextIn) ],
 
   % all aggregated values end up with a <<"stat">> context value, so
   % remove it and get the type
@@ -115,7 +115,7 @@ legacy_rrd_path (Prefix, ProgId, MetricType, MetricName, Host, Context) ->
     case Context of
       [] -> "";
       L -> [ "-",
-             mondemand_server_util:join ([[K,"=",V] || {K, V} <- L ], "-")
+             mondemand_server_util:join ([[K,"=",V] || {K, V} <- lists:sort (L) ], "-")
            ]
     end,
 
@@ -193,7 +193,7 @@ graphite_rrd_path (Prefix, ProgId,  MetricType, MetricName, Host, Context,
       L ->
         lists:flatten (
           [ [graphite_normalize_token (K), graphite_normalize_token (V)]
-               || {K, V} <- L,
+               || {K, V} <- lists:sort (L),
                   K =/= <<"stat">> ]
         )
     end,
