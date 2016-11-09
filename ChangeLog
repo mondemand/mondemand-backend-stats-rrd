@@ -1,3 +1,6 @@
+* Fri Oct 20 2016 Tim Whalen <tim.whalen@openx.com> 0.12.2
+- sort context keys when generating rrd filenames
+
 * Fri Sep 09 2016 Anthony Molinaro <anthonym@alumni.caltech.edu> 0.12.1
 - update mondemand-server dep
 
