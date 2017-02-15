@@ -31,7 +31,7 @@
 %% supervisor callbacks
 -export ([init/1]).
 
--define (POOL, md_rrd_pool).
+-define (POOL, mdbes_rrd_pool).
 -record (state, { connection_config,
                   send_timeout,
                   recv_timeout,
@@ -43,7 +43,7 @@
 %% mondemand_server_backend callbacks
 %%====================================================================
 start_link (Config) ->
-  supervisor:start_link ({local, ?MODULE}, ?MODULE, [Config]).
+  supervisor:start_link ({local, mdbes_rrd_sup}, ?MODULE, [Config]).
 
 process (Event) ->
   mondemand_backend_worker_pool_sup:process (?POOL, Event).
@@ -72,7 +72,7 @@ init ([Config]) ->
   AggregateDir =
     proplists:get_value (aggregate_dir, Config, "agg"),
   ErrorDuration =
-    proplists:get_value(error_timeout, Config, 300),
+    proplists:get_value (error_timeout, Config, 300),
 
   { ok,
     {

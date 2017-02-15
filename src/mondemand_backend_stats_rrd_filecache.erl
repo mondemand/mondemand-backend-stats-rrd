@@ -34,19 +34,19 @@
          ]).
 
 -record (state, { delay, interval, timer, file, host_dir, aggregate_dir }).
--define (TABLE, md_be_stats_rrd_filecache).
+-define (TABLE, mdbes_rrd_filecache).
 
 start_link (FileNameCacheFile, HostDir, AggregateDir, ErrorTimeout) ->
   mondemand_global:put (md_be_rrd_dirs, {HostDir, AggregateDir}),
-  mondemand_global:put(error_timeout, ErrorTimeout),
-  gen_server:start_link ({local, ?MODULE},?MODULE,
+  mondemand_global:put (error_timeout, ErrorTimeout),
+  gen_server:start_link ({local, mdbes_rrd_filecache},?MODULE,
                          [FileNameCacheFile, HostDir, AggregateDir],[]).
 
 get_dirs () ->
   mondemand_global:get (md_be_rrd_dirs).
 
 save_cache () ->
-  File = gen_server:call(?MODULE,{cache_file}),
+  File = gen_server:call (?MODULE,{cache_file}),
   save_cache (File).
 
 save_cache (File) ->
@@ -60,7 +60,7 @@ save_cache (File) ->
   Result.
 
 migrate_cache (MillisPause) ->
-  File = gen_server:call(?MODULE,{cache_file}),
+  File = gen_server:call(?MODULE, {cache_file}),
   PreProcess = os:timestamp (),
   migrate_all (MillisPause),
   PostProcess = os:timestamp (),
@@ -137,10 +137,10 @@ delete_key (Key) when is_tuple (Key) ->
   ets:delete (?TABLE, Key).
 
 mark_error (FilenameOrKey, Error)  ->
-  ErrorDuration = mondemand_global:get(error_timeout),
+  ErrorDuration = mondemand_global:get (error_timeout),
   error_logger:error_msg ("Failure ~p for Key ~p, placing in error state for ~p seconds.",
                           [Error, filename_to_key (FilenameOrKey), ErrorDuration]),
-  update_state_and_timestamp(FilenameOrKey, {error, Error}).
+  update_state_and_timestamp (FilenameOrKey, {error, Error}).
 mark_created (FilenameOrKey) ->
   update_state (FilenameOrKey, created).
 
@@ -155,12 +155,12 @@ filename_to_key (Filename) when is_binary (Filename) ->
     [O] -> O
   end.
 
-update_state_and_timestamp(Key, State) when is_tuple (Key) ->
-    ets:update_element(?TABLE, Key, [{3, State}, {4, os:timestamp()}]);
+update_state_and_timestamp (Key, State) when is_tuple (Key) ->
+    ets:update_element (?TABLE, Key, [{3, State}, {4, os:timestamp ()}]);
 update_state_and_timestamp(Filename, State) ->
     case filename_to_key (Filename) of
         undefined -> false;
-        Key -> update_state_and_timestamp(Key, State)
+        Key -> update_state_and_timestamp (Key, State)
     end.
 
 update_state (Key, State) when is_tuple (Key) ->
@@ -172,7 +172,7 @@ update_state (Filename, State) ->
   end.
 
 update_cache () ->
-  File = gen_server:call(?MODULE,{cache_file}),
+  File = gen_server:call (?MODULE,{cache_file}),
   update_cache (File).
 
 update_cache (FileNameCacheFile) ->

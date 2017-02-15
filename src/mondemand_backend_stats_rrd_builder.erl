@@ -20,7 +20,7 @@
 -record (state, {}).
 
 start_link () ->
-  gen_server:start_link ({local, ?MODULE},?MODULE, [], []).
+  gen_server:start_link ({local, mdbes_rrd_builder},?MODULE, [], []).
 
 build (FullyQualifiedPrefix, ProgId, MetricType,
        MetricName, Host, Context, AggregatedType,
