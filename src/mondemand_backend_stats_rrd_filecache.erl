@@ -1,22 +1,21 @@
 -module (mondemand_backend_stats_rrd_filecache).
 
 -behaviour (gen_server).
+
+-include ("mondemand_backend_stats_rrd_internal.hrl").
 -include_lib("kernel/include/file.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
 %% API
 -export ([ start_link/4,
-           get_dirs/0,
            check_cache/6,
-           key/5,
-           clear_path/1,
-           delete_key/1,
+           check_cache/1,
            save_cache/0,
-           clear_errors/0,
            show_errors/0,
+           clear_errors/0,
+           clear_entry/1,
            mark_error/2,
            mark_created/1,
-           filename_to_key/1,
            print_stats/0,
            state_stats/0
          ]).
@@ -31,113 +30,86 @@
          ]).
 
 -record (state, { delay, interval, timer, file, host_dir, aggregate_dir }).
+-define (NAME, mdbes_rrd_filecache).
 -define (TABLE, mdbes_rrd_filecache).
 
+%%====================================================================
+%% API
+%%====================================================================
 start_link (FileNameCacheFile, HostDir, AggregateDir, ErrorTimeout) ->
   mondemand_global:put (md_be_rrd_dirs, {HostDir, AggregateDir}),
   mondemand_global:put (error_timeout, ErrorTimeout),
-  gen_server:start_link ({local, mdbes_rrd_filecache},?MODULE,
+  gen_server:start_link ({local, ?NAME},?MODULE,
                          [FileNameCacheFile, HostDir, AggregateDir],[]).
 
-get_dirs () ->
-  mondemand_global:get (md_be_rrd_dirs).
+%% return {ok, FilePath, FileKey} or {error, Reason, FileKey}
+check_cache (Prefix, ProgIdIn, MetricType,
+             MetricNameIn, HostIn, ContextIn) ->
+  FileKey =
+    mondemand_backend_stats_rrd_key:new (ProgIdIn, MetricType, MetricNameIn,
+                                         HostIn, ContextIn),
+  CurrentTimestamp = os:timestamp(),
+
+  case ets:lookup (?TABLE, FileKey) of
+    [{_, FP, State, Timestamp}] ->
+      case State of
+        created -> {ok, FP, FileKey};
+        creating -> {error, creating, FileKey};
+        clearing -> {error, clearing, FileKey};
+        {error, E} ->
+          check_error_duration (FileKey, E, Timestamp, CurrentTimestamp)
+      end;
+    [] ->
+      % calculate the context for building, it includes the directory
+      % and filename for the legacy rrd files (which are still the primary
+      % files)
+      BuilderContext =
+        #mdbes_rrd_builder_context { legacy_rrd_file_dir = LegacyFileDir,
+                                     legacy_rrd_file_name= LegacyFileName
+                                   } =
+          mondemand_backend_stats_rrd_builder:calculate_context (
+            Prefix, FileKey, get_dirs()
+          ),
+
+      % get a complete path for the cache as that's what rrdcached will expect
+      RRDFile = filename:join ([LegacyFileDir, LegacyFileName]),
+
+      % store in the cache in the creating state
+      ets:insert (?TABLE, {FileKey, RRDFile, creating, CurrentTimestamp}),
+
+      % then ask the builder to build it asyncronously
+      mondemand_backend_stats_rrd_builder:build (BuilderContext),
+
+      % and return to caller that we are creating so no writes are attempted
+      % until it's created
+      {error, creating, FileKey}
+  end.
+
+check_cache (FileNameOrKey) ->
+  Key = filename_to_key (FileNameOrKey),
+  ets:lookup (?TABLE, Key).
 
 save_cache () ->
-  File = gen_server:call (?MODULE,{cache_file}),
+  File = gen_server:call (?NAME, {cache_file}),
   save_cache (File).
-
-save_cache (File) ->
-  error_logger:info_msg ("saving file name cache to ~p",[File]),
-  PreProcess = os:timestamp (),
-  Result = ets:tab2file (?TABLE, File),
-  PostProcess = os:timestamp (),
-  ProcessMillis =
-    webmachine_util:now_diff_milliseconds (PostProcess, PreProcess),
-  error_logger:info_msg ("saved file name cache to ~p in ~p millis",[File, ProcessMillis]),
-  Result.
 
 show_errors () ->
   ets:select (?TABLE,
               ets:fun2ms(fun({K,_,{error,E},_}) -> {K,E} end)).
 
-clear_error(FileKey) ->
-  ets:delete(?TABLE, FileKey).
-
 clear_errors () ->
   ets:select_delete (?TABLE,
                      ets:fun2ms (fun({_,_,{error,_},_}) -> true end)).
 
-clear_path (Path) when is_list (Path) ->
-  clear_path (list_to_binary (Path));
-clear_path (Path) ->
-  ets:select_delete(?TABLE,
-    ets:fun2ms(fun ({{_,_,_,_,_},F,_,_}) when F =:= Path -> true end)
-  ).
-
-delete_key (Key) when is_tuple (Key) ->
-  ets:delete (?TABLE, Key).
+clear_entry (FileNameOrKey) ->
+  Key = filename_to_key (FileNameOrKey),
+  ets:delete(?TABLE, Key).
 
 mark_error (FilenameOrKey, Error)  ->
-  ErrorDuration = mondemand_global:get (error_timeout),
-  error_logger:error_msg ("Failure ~p for Key ~p, placing in error state for ~p seconds.",
-                          [Error, filename_to_key (FilenameOrKey), ErrorDuration]),
   update_state_and_timestamp (FilenameOrKey, {error, Error}).
+
 mark_created (FilenameOrKey) ->
   update_state (FilenameOrKey, created).
-
-filename_to_key (Key) when is_tuple (Key) ->
-  Key;
-filename_to_key (Filename) when is_list (Filename) ->
-  filename_to_key (list_to_binary (Filename));
-filename_to_key (Filename) when is_binary (Filename) ->
-  case ets:select(?TABLE,
-                  ets:fun2ms(fun({K,F,_,_}) when F =:= Filename -> K end)) of
-    [] -> undefined;
-    [O] -> O
-  end.
-
-update_state_and_timestamp (Key, State) when is_tuple (Key) ->
-    ets:update_element (?TABLE, Key, [{3, State}, {4, os:timestamp ()}]);
-update_state_and_timestamp(Filename, State) ->
-    case filename_to_key (Filename) of
-        undefined -> false;
-        Key -> update_state_and_timestamp (Key, State)
-    end.
-
-update_state (Key, State) when is_tuple (Key) ->
-  ets:update_element (?TABLE, Key, {3, State});
-update_state (Filename, State) ->
-  case filename_to_key (Filename) of
-    undefined -> false;
-    Key -> update_state (Key, State)
-  end.
-
-load_cache (File) ->
-  error_logger:info_msg ("loading file name cache from ~p",[File]),
-  PreProcess = os:timestamp (),
-  Result =
-    case ets:file2tab (File) of
-      {ok, ?TABLE} ->
-        % in some cases if the server is restarted after a cache file has been
-        % written but while the builder is still building, cache entries can
-        % be left in the creating state, and so will never receive updates, so
-        % on startup, just remove all those entries
-        error_logger:info_msg ("start clearing inflight data from cache"),
-        ets:select_delete (?TABLE,
-                           ets:fun2ms(fun({_,_,creating,_}) -> true end)),
-        error_logger:info_msg ("done clearing inflight data from cache"),
-        true;
-      Error ->
-        error_logger:error_msg (
-          "failed to load file name cache from ~p because ~p",[File, Error]),
-        false
-    end,
-  PostProcess = os:timestamp (),
-  ProcessMillis =
-    webmachine_util:now_diff_milliseconds (PostProcess, PreProcess),
-  error_logger:info_msg ("loaded file name cache from ~p in ~p millis",
-                         [File, ProcessMillis]),
-  Result.
 
 print_stats() ->
   [ io:format ("~-8s : ~b~n",[atom_to_list(K), V]) || {K,V} <- state_stats() ],
@@ -210,50 +182,87 @@ terminate (_Reason, #state { file = _File }) ->
 code_change (_OldVsn, State, _Extra) ->
   { ok, State }.
 
-%% API
-%%
-key (ProgId, MetricType, MetricName, Host, Context) ->
-  {ProgId, MetricType, MetricName, Host, Context}.
+%%====================================================================
+%% internal functions
+%%====================================================================
+get_dirs () ->
+  mondemand_global:get (md_be_rrd_dirs).
 
-check_error_timeout(Timestamp, CurrentTimestamp) ->
-    %% True if error timeout elapsed, False otherwise
-    mondemand_util:now_to_epoch_secs(CurrentTimestamp) - mondemand_util:now_to_epoch_secs(Timestamp)
-        >= mondemand_global:get(error_timeout).
+check_error_timeout (Timestamp, CurrentTimestamp) ->
+  %% True if error timeout elapsed, False otherwise
+  mondemand_util:now_to_epoch_secs(CurrentTimestamp)
+    - mondemand_util:now_to_epoch_secs(Timestamp)
+  >= mondemand_global:get(error_timeout).
 
-check_error_duration(Key, Error, Timestamp, CurrentTimestamp) ->
-    case check_error_timeout(Timestamp, CurrentTimestamp) of
-        true -> error_logger:info_msg('Clearing error for ~p.', [Key]),
-                clear_error(Key),
-                {error, clearing, Key};
-        false -> {error, Error, Key}
-    end.
-
-%% return {ok, FilePath, FileKey} or {error, Reason, FileKey}
-check_cache (Prefix, ProgIdIn, MetricType,
-             MetricNameIn, HostIn, ContextIn) ->
-  FileKey = key (ProgIdIn, MetricType, MetricNameIn, HostIn, ContextIn),
-  CurrentTimestamp = os:timestamp(),
-  case ets:lookup (?TABLE, FileKey) of
-    [{_, FP, State, Timestamp}] ->
-      case State of
-        created -> {ok, FP, FileKey};
-        creating -> {error, creating, FileKey};
-        clearing -> {error, clearing, FileKey};
-        {error, E} -> check_error_duration(FileKey, E, Timestamp, CurrentTimestamp);
-        error -> check_error_duration(FileKey, error, Timestamp, CurrentTimestamp)
-      end;
-    [] ->
-      {FullyQualifiedPrefix, ProgId, MetricName, Host, Context,
-       AggregatedType, FilePath, RRDFile} =
-        mondemand_backend_stats_rrd_builder:rrdfilename
-          (Prefix, ProgIdIn, MetricType, MetricNameIn, HostIn, ContextIn),
-      % mark as being created
-      ets:insert (?TABLE, {FileKey, RRDFile, creating, CurrentTimestamp}),
-      % then create
-      mondemand_backend_stats_rrd_builder:build (FullyQualifiedPrefix,
-        ProgId, MetricType, MetricName, Host, Context, AggregatedType,
-        FilePath, RRDFile),
-      % and return to caller that we are creating so no writes are attempted
-      % until it's created
-      {error, creating, FileKey}
+check_error_duration (Key, Error, Timestamp, CurrentTimestamp) ->
+  case check_error_timeout(Timestamp, CurrentTimestamp) of
+    true -> clear_entry (Key),
+            {error, clearing, Key};
+    false -> {error, Error, Key}
   end.
+
+filename_to_key (Key) when is_tuple (Key) ->
+  Key;
+filename_to_key (Filename) when is_list (Filename) ->
+  filename_to_key (list_to_binary (Filename));
+filename_to_key (Filename) when is_binary (Filename) ->
+  case ets:select(?TABLE,
+                  ets:fun2ms(fun({K,F,_,_}) when F =:= Filename -> K end)) of
+    [] -> undefined;
+    [O] -> O
+  end.
+
+update_state_and_timestamp (Key, State) when is_tuple (Key) ->
+  ets:update_element (?TABLE, Key, [{3, State}, {4, os:timestamp ()}]);
+update_state_and_timestamp (Filename, State) ->
+  case filename_to_key (Filename) of
+      undefined -> false;
+      Key -> update_state_and_timestamp (Key, State)
+  end.
+
+update_state (Key, State) when is_tuple (Key) ->
+  ets:update_element (?TABLE, Key, {3, State});
+update_state (Filename, State) ->
+  case filename_to_key (Filename) of
+    undefined -> false;
+    Key -> update_state (Key, State)
+  end.
+
+save_cache (File) ->
+  error_logger:info_msg ("saving file name cache to ~p",[File]),
+  PreProcess = os:timestamp (),
+  Result = ets:tab2file (?TABLE, File),
+  PostProcess = os:timestamp (),
+  ProcessMillis = webmachine_util:now_diff_milliseconds (PostProcess, PreProcess),
+  error_logger:info_msg ("saved file name cache to ~p in ~p millis",
+                         [File, ProcessMillis]),
+  Result.
+
+load_cache (File) ->
+  error_logger:info_msg ("loading file name cache from ~p",[File]),
+  PreProcess = os:timestamp (),
+  Result =
+    case ets:file2tab (File) of
+      {ok, ?TABLE} ->
+        % in some cases if the server is restarted after a cache file has been
+        % written but while the builder is still building, cache entries can
+        % be left in the creating state, and so will never receive updates, so
+        % on startup, just remove all those entries
+        error_logger:info_msg ("start clearing inflight data from cache"),
+        ets:select_delete (?TABLE,
+                           ets:fun2ms(fun({_,_,creating,_}) -> true end)),
+        error_logger:info_msg ("done clearing inflight data from cache"),
+        true;
+      Error ->
+        error_logger:error_msg (
+          "failed to load file name cache from ~p because ~p",[File, Error]),
+        false
+    end,
+  PostProcess = os:timestamp (),
+  ProcessMillis =
+    webmachine_util:now_diff_milliseconds (PostProcess, PreProcess),
+  error_logger:info_msg ("loaded file name cache from ~p in ~p millis",
+                         [File, ProcessMillis]),
+  Result.
+
+

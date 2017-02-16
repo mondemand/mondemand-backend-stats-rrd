@@ -2,10 +2,12 @@
 
 -behaviour (gen_server).
 
+-include ("mondemand_backend_stats_rrd_internal.hrl").
+
 %% API
 -export ([ start_link/0,
-           build/9,
-           rrdfilename/6
+           calculate_context/3,
+           build/1
          ]).
 
 %% gen_server callbacks
@@ -18,25 +20,30 @@
          ]).
 
 -record (state, {}).
+-define (NAME, mdbes_rrd_builder).
 
+%%====================================================================
+%% API
+%%====================================================================
 start_link () ->
-  gen_server:start_link ({local, mdbes_rrd_builder},?MODULE, [], []).
+  gen_server:start_link ({local, ?NAME}, ?MODULE, [], []).
 
-build (FullyQualifiedPrefix, ProgId, MetricType,
-       MetricName, Host, Context, AggregatedType,
-       FilePath, RRDFile) ->
-  gen_server:cast (?MODULE,
-    {build, FullyQualifiedPrefix, ProgId, MetricType,
-            MetricName, Host, Context, AggregatedType,
-            FilePath, RRDFile}).
-
-rrdfilename (Prefix, ProgIdIn, MetricType, MetricNameIn, HostIn, ContextIn) ->
+calculate_context (Prefix, FileKey, Dirs) ->
   % normalize to binary to simplify rest of code
-  ProgId = mondemand_util:binaryify (ProgIdIn),
-  MetricName = mondemand_util:binaryify (MetricNameIn),
-  Host = mondemand_util:binaryify (HostIn),
-  Context = [ {mondemand_util:binaryify(K), mondemand_util:binaryify(V) }
-              || {K, V} <- lists:sort (ContextIn) ],
+  ProgId = mondemand_util:binaryify (
+             mondemand_backend_stats_rrd_key:prog_id (FileKey)
+           ),
+  MetricName = mondemand_util:binaryify (
+                 mondemand_backend_stats_rrd_key:metric_name (FileKey)
+               ),
+  MetricType = mondemand_backend_stats_rrd_key:metric_type (FileKey),
+  Host = mondemand_util:binaryify (
+           mondemand_backend_stats_rrd_key:host (FileKey)
+         ),
+  Context = [ {mondemand_util:binaryify (K), mondemand_util:binaryify (V) }
+              || {K, V}
+              <- mondemand_backend_stats_rrd_key:context (FileKey)
+            ],
 
   % all aggregated values end up with a <<"stat">> context value, so
   % remove it and get the type
@@ -59,13 +66,28 @@ rrdfilename (Prefix, ProgIdIn, MetricType, MetricNameIn, HostIn, ContextIn) ->
     end,
 
   % generate some paths and files which graphite understands
-  {FilePath, FileName} =
+  {LegacyFileDir, LegacyFileName} =
      legacy_rrd_path (FullyQualifiedPrefix, ProgId, MetricType,
                       MetricName, Host, Context),
 
-  RRDFile = filename:join ([FilePath, FileName]),
-  {FullyQualifiedPrefix, ProgId, MetricName, Host,
-   Context, AggregatedType, FilePath, RRDFile}.
+  {GraphiteFileDir, GraphiteFileName} =
+     graphite_rrd_path (FullyQualifiedPrefix, ProgId, MetricType,
+                        MetricName, Host, Context,
+                        AggregatedType =/= undefined,
+                        Dirs),
+
+  #mdbes_rrd_builder_context {
+    file_key = FileKey,
+    metric_type = MetricType,
+    aggregated_type = AggregatedType,
+    legacy_rrd_file_dir = LegacyFileDir,
+    legacy_rrd_file_name = LegacyFileName,
+    graphite_rrd_file_dir = GraphiteFileDir,
+    graphite_rrd_file_name = GraphiteFileName
+  }.
+
+build (BuilderContext) ->
+  gen_server:cast (?NAME, {build, BuilderContext}).
 
 %%====================================================================
 %% gen_server callbacks
@@ -78,18 +100,15 @@ handle_call (Request, From, State = #state {}) ->
                             [?MODULE, Request, From]),
   { reply, ok, State }.
 
-handle_cast ({build,FullyQualifiedPrefix, ProgId, MetricType,
-                    MetricName, Host, Context, AggregatedType,
-                    FilePath, RRDFile},
+handle_cast ({ build,
+               Context = #mdbes_rrd_builder_context { file_key = FileKey }
+             },
              State = #state {}) ->
-  FileKey = {ProgId, MetricType, MetricName, Host, Context},
-  case
-    ibuild(FullyQualifiedPrefix, ProgId, MetricType,
-           MetricName, Host, Context, AggregatedType, FilePath, RRDFile) of
-      {ok, _} ->
-        mondemand_backend_stats_rrd_filecache:mark_created (FileKey);
-      E ->
-        mondemand_backend_stats_rrd_filecache:mark_error (FileKey, E)
+  case maybe_create_files (Context) of
+    {ok, _} ->
+      mondemand_backend_stats_rrd_filecache:mark_created (FileKey);
+    E ->
+      mondemand_backend_stats_rrd_filecache:mark_error (FileKey, E)
   end,
   {noreply, State};
 handle_cast (Request, State = #state {}) ->
@@ -106,7 +125,9 @@ terminate (_Reason, #state {}) ->
 code_change (_OldVsn, State, _Extra) ->
   { ok, State }.
 
-% internal functions
+%%====================================================================
+%% internal functions
+%%====================================================================
 legacy_rrd_path (Prefix, ProgId,
                    {statset, SubType}, MetricName, Host, Context) ->
   legacy_rrd_path (Prefix, ProgId, SubType, MetricName, Host, Context);
@@ -115,7 +136,7 @@ legacy_rrd_path (Prefix, ProgId, MetricType, MetricName, Host, Context) ->
     case Context of
       [] -> "";
       L -> [ "-",
-             mondemand_server_util:join ([[K,"=",V] || {K, V} <- lists:sort (L) ], "-")
+             mondemand_server_util:join ([[K,"=",V] || {K, V} <- L ], "-")
            ]
     end,
 
@@ -132,44 +153,6 @@ legacy_rrd_path (Prefix, ProgId, MetricType, MetricName, Host, Context) ->
 
   {FilePath, FileName}.
 
-ibuild (FullyQualifiedPrefix, ProgId, MetricType,
-        MetricName, Host, Context, AggregatedType, FilePath, RRDFile) ->
-  case mondemand_server_util:mkdir_p (FilePath) of
-    ok ->
-      case maybe_create (MetricType, AggregatedType, RRDFile) of
-        {ok, _} ->
-          {GraphitePath, GraphiteFile} =
-            graphite_rrd_path (FullyQualifiedPrefix, ProgId, MetricType,
-                               MetricName, Host, Context,
-                               AggregatedType =/= undefined),
-          GRRDFile = filename:join ([GraphitePath, GraphiteFile]),
-
-          % TODO: check for error and don't create if it's there
-          case mondemand_server_util:mkdir_p (GraphitePath) of
-            ok ->
-              % making symlinks for the moment
-              file:make_symlink (RRDFile, GRRDFile),
-              {ok, RRDFile};
-            E ->
-              {error, {cant_create_dir, GraphitePath, E}}
-          end;
-        {timeout, Timeout} ->
-          error_logger:error_msg (
-            "Unable to create '~p' because of timeout ~p",[RRDFile, Timeout]),
-          {error, timeout};
-        {error, Error} ->
-          error_logger:error_msg (
-            "Unable to create '~p' because of ~p",[RRDFile, Error]),
-          {error, Error};
-        Unknown ->
-          error_logger:error_msg (
-            "Unable to create '~p' because of unknown ~p",[RRDFile, Unknown]),
-          {error, Unknown}
-      end;
-    E2 ->
-      {error, {cant_create_dir, FilePath, E2}}
-  end.
-
 graphite_normalize_host (Host) ->
   case re:run(Host,"([^\.]+)", [{capture, all_but_first, binary}]) of
     {match, [H]} -> H;
@@ -182,22 +165,22 @@ graphite_normalize_token (Token) ->
 
 graphite_rrd_path (Prefix, ProgId,
                    {statset, SubType}, MetricName, Host, Context,
-                   IsAggregate) ->
+                   IsAggregate, Dirs) ->
   graphite_rrd_path (Prefix, ProgId, SubType, MetricName, Host, Context,
-                     IsAggregate);
+                     IsAggregate, Dirs);
 graphite_rrd_path (Prefix, ProgId,  MetricType, MetricName, Host, Context,
-                   IsAggregate) ->
+                   IsAggregate, Dirs) ->
   ContextParts =
     case Context of
       [] -> [];
       L ->
         lists:flatten (
           [ [graphite_normalize_token (K), graphite_normalize_token (V)]
-               || {K, V} <- lists:sort (L),
+               || {K, V} <- L,
                   K =/= <<"stat">> ]
         )
     end,
-  {HostDir, AggregateDir} = mondemand_backend_stats_rrd_filecache:get_dirs(),
+  {HostDir, AggregateDir} = Dirs,
   % mondemand raw data will go in the "md" directory, aggregates will
   % go in the "agg" directory
   InnerPath =
@@ -217,8 +200,48 @@ graphite_rrd_path (Prefix, ProgId,  MetricType, MetricName, Host, Context,
   FileName = list_to_binary ([atom_to_list (MetricType),".rrd"]),
   {FilePath, FileName}.
 
-maybe_create (Types, AggregatedType, File) ->
+maybe_create_files ( #mdbes_rrd_builder_context {
+                       metric_type = MetricType,
+                       aggregated_type = AggregatedType,
+                       legacy_rrd_file_dir = LegacyFileDir,
+                       legacy_rrd_file_name = LegacyFileName,
+                       graphite_rrd_file_dir = GraphiteFileDir,
+                       graphite_rrd_file_name = GraphiteFileName
+                     } ) ->
+  RRDFile = filename:join ([LegacyFileDir, LegacyFileName]),
 
+  case mondemand_server_util:mkdir_p (LegacyFileDir) of
+    ok ->
+      case maybe_create (MetricType, AggregatedType, RRDFile) of
+        {ok, _} ->
+          case mondemand_server_util:mkdir_p (GraphiteFileDir) of
+            ok ->
+              GRRDFile = filename:join ([GraphiteFileDir, GraphiteFileName]),
+
+              % making symlinks for the moment
+              file:make_symlink (RRDFile, GRRDFile),
+              {ok, RRDFile};
+            E ->
+              {error, {cant_create_dir, GraphiteFileDir, E}}
+          end;
+        {timeout, Timeout} ->
+          error_logger:error_msg (
+            "Unable to create '~p' because of timeout ~p",[RRDFile, Timeout]),
+          {error, timeout};
+        {error, Error} ->
+          error_logger:error_msg (
+            "Unable to create '~p' because of ~p",[RRDFile, Error]),
+          {error, Error};
+        Unknown ->
+          error_logger:error_msg (
+            "Unable to create '~p' because of unknown ~p",[RRDFile, Unknown]),
+          {error, Unknown}
+      end;
+    E2 ->
+      {error, {cant_create_dir, LegacyFileDir, E2}}
+  end.
+
+maybe_create (Types, AggregatedType, File) ->
   {Type, SubType} =
      case Types of
        {T, S} -> {T, S};

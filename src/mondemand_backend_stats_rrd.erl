@@ -166,9 +166,9 @@ send (State = #state {connection = Client0}, Data) ->
               [
                 case E of
                   {error, no_file} ->
-                    mondemand_backend_stats_rrd_filecache:delete_key (
+                    mondemand_backend_stats_rrd_filecache:clear_entry (
                       rrdcached_client:command_get_extra (C)
-                    ); 
+                    );
                   _ ->
                     mondemand_backend_stats_rrd_filecache:mark_error (
                       rrdcached_client:command_get_extra (C),
@@ -232,7 +232,7 @@ format_stat (_Num, _Total, Prefix, ProgId, Host,
         % remove the key from the cache
         case E of
           {error, no_file} ->
-            mondemand_backend_stats_rrd_filecache:delete_key (FK);
+            mondemand_backend_stats_rrd_filecache:clear_entry (FK);
           _ ->
             ok
         end
