@@ -1,3 +1,9 @@
+* Wed Feb 16 2017 Anthony Molinaro <anthonym@alumni.caltech.edu> 1.0.0
+- pretty major cleanup of the cache and builder
+- ended up moving the sorting of context keys to a more central place
+- removed extra logging for errors, they are continuous and if you really
+want to see them you can always use the show_errors/1 function
+
 * Fri Oct 20 2016 Tim Whalen <tim.whalen@openx.com> 0.12.2
 - sort context keys when generating rrd filenames
 
