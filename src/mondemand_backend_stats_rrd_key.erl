@@ -9,7 +9,7 @@
         ]).
 
 new (ProgId, MetricType, MetricName, Host, Context) ->
-  {ProgId, MetricType, MetricName, Host, Context}.
+  {ProgId, MetricType, MetricName, Host, lists:sort(Context)}.
 
 prog_id({P,_,_,_,_}) -> P.
 metric_type({_,T,_,_,_}) -> T.
