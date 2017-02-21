@@ -1,3 +1,7 @@
+* Mon Feb 20 2017 Anthony Molinaro <anthonym@alumni.caltech.edu> 1.0.1
+- provide a way to upgrade from the previous version without rebuilding
+the cache
+
 * Wed Feb 16 2017 Anthony Molinaro <anthonym@alumni.caltech.edu> 1.0.0
 - pretty major cleanup of the cache and builder
 - ended up moving the sorting of context keys to a more central place

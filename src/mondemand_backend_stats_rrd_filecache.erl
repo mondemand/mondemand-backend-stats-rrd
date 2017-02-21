@@ -32,6 +32,8 @@
 -record (state, { delay, interval, timer, file, host_dir, aggregate_dir }).
 -define (NAME, mdbes_rrd_filecache).
 -define (TABLE, mdbes_rrd_filecache).
+% FIXME: temporary for upgrade from pre-1.0.0
+-define (OLD_TABLE, md_be_stats_rrd_filecache).
 
 %%====================================================================
 %% API
@@ -252,6 +254,10 @@ load_cache (File) ->
         ets:select_delete (?TABLE,
                            ets:fun2ms(fun({_,_,creating,_}) -> true end)),
         error_logger:info_msg ("done clearing inflight data from cache"),
+        true;
+      % FIXME: temporary for upgrade from pre-1.0.0
+      {ok, ?OLD_TABLE} ->
+        ets:rename (?OLD_TABLE, ?TABLE),
         true;
       Error ->
         error_logger:error_msg (
