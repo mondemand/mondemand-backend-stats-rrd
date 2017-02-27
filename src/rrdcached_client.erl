@@ -300,3 +300,12 @@ parse_status_message ("illegal attempt to update using time " ++ _Time) ->
   {error, timestamp};
 parse_status_message (Line) ->
   {error, {unknown, Line}}.
+
+%%--------------------------------------------------------------------
+%%% Test functions
+%%--------------------------------------------------------------------
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+
+-endif.

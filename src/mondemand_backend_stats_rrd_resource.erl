@@ -179,3 +179,12 @@ get_jsonp (ReqData) ->
 
 get_prefix (ReqData) ->
   wrq:get_qs_value ("term", ReqData).
+
+%%--------------------------------------------------------------------
+%%% Test functions
+%%--------------------------------------------------------------------
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+
+-endif.

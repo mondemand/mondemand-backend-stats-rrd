@@ -74,6 +74,11 @@ init ([Config]) ->
   ErrorDuration =
     proplists:get_value (error_timeout, Config, 300),
 
+  WhitelistedProgIds =
+    proplists:get_value (whitelisted, Config, []),
+  BlacklistedProgIds =
+    proplists:get_value (blacklisted, Config, []),
+
   { ok,
     {
       {one_for_one, 10, 10},
@@ -86,6 +91,15 @@ init ([Config]) ->
           2000,
           worker,
           [ mondemand_backend_stats_rrd_builder]
+        },
+        { mondemand_backend_stats_rrd_wblist,
+          { mondemand_backend_stats_rrd_wblist, start_link,
+           [WhitelistedProgIds, BlacklistedProgIds]
+          },
+          permanent,
+          2000,
+          worker,
+          [ mondemand_backend_stats_rrd_wblist ]
         },
         { mondemand_backend_stats_rrd_filecache,
           { mondemand_backend_stats_rrd_filecache, start_link,
@@ -257,3 +271,12 @@ footer () -> undefined.
 
 handle_response (_, _) ->
   ok.
+
+%%--------------------------------------------------------------------
+%%% Test functions
+%%--------------------------------------------------------------------
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+
+-endif.

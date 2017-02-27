@@ -310,3 +310,12 @@ create_summary (SubType, AggregatedType, File) ->
       " \"RRA:AVERAGE:0.5:15:9600\""   % 100 days of 15 minute intervals
       " \"RRA:AVERAGE:0.5:1440:1200\"" % 1200 days of 1 day intervals
   ]).
+
+%%--------------------------------------------------------------------
+%%% Test functions
+%%--------------------------------------------------------------------
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+
+-endif.

@@ -17,7 +17,11 @@
            mark_error/2,
            mark_created/1,
            print_stats/0,
-           state_stats/0
+           state_stats/0,
+           blacklist_all/0,
+           blacklist_prog_id/1,
+           whitelist_all/0,
+           whitelist_prog_id/1
          ]).
 
 %% gen_server callbacks
@@ -58,6 +62,7 @@ check_cache (Prefix, ProgIdIn, MetricType,
         created -> {ok, FP, FileKey};
         creating -> {error, creating, FileKey};
         clearing -> {error, clearing, FileKey};
+        blacklisted -> {error, blacklisted, FileKey};
         {error, E} ->
           check_error_duration (FileKey, E, Timestamp, CurrentTimestamp)
       end;
@@ -76,15 +81,22 @@ check_cache (Prefix, ProgIdIn, MetricType,
       % get a complete path for the cache as that's what rrdcached will expect
       RRDFile = filename:join ([LegacyFileDir, LegacyFileName]),
 
-      % store in the cache in the creating state
-      ets:insert (?TABLE, {FileKey, RRDFile, creating, CurrentTimestamp}),
+      case mondemand_backend_stats_rrd_wblist:is_prog_id_allowed (ProgIdIn) of
+        false ->
+          % store in the cache in the creating state
+          ets:insert (?TABLE, {FileKey, RRDFile, blacklisted, CurrentTimestamp}),
+          {error, blacklisted, FileKey};
+        true ->
+          % store in the cache in the creating state
+          ets:insert (?TABLE, {FileKey, RRDFile, creating, CurrentTimestamp}),
 
-      % then ask the builder to build it asyncronously
-      mondemand_backend_stats_rrd_builder:build (BuilderContext),
+          % then ask the builder to build it asyncronously
+          mondemand_backend_stats_rrd_builder:build (BuilderContext),
 
-      % and return to caller that we are creating so no writes are attempted
-      % until it's created
-      {error, creating, FileKey}
+          % and return to caller that we are creating so no writes are attempted
+          % until it's created
+          {error, creating, FileKey}
+      end
   end.
 
 check_cache (FileNameOrKey) ->
@@ -114,7 +126,7 @@ mark_created (FilenameOrKey) ->
   update_state (FilenameOrKey, created).
 
 print_stats() ->
-  [ io:format ("~-8s : ~b~n",[atom_to_list(K), V]) || {K,V} <- state_stats() ],
+  [ io:format ("~-15s : ~b~n",[atom_to_list(K), V]) || {K,V} <- state_stats() ],
   ok.
 
 state_stats() ->
@@ -129,8 +141,55 @@ state_stats() ->
     },
     { clearing,
       ets:select_count (?TABLE, ets:fun2ms(fun({_,_,clearing,_}) -> true end))
+    },
+    { blacklisted,
+      ets:select_count (?TABLE, ets:fun2ms(fun({_,_,blacklisted,_}) -> true end))
     }
   ].
+
+blacklist_all () ->
+  ets:foldl(fun ({K,_,_,_},A) ->
+              update_state_and_timestamp (K, blacklisted),
+              A + 1
+            end,
+            0,
+            ?TABLE).
+
+blacklist_prog_id (ProgId) ->
+  ProgIdBin = mondemand_util:binaryify(ProgId),
+  ets:foldl(fun ({K = {P,_,_,_,_},_,_,_},A) ->
+              case P =:= ProgIdBin of
+                true ->
+                  update_state_and_timestamp (K, blacklisted),
+                  A + 1;
+                false ->
+                  A
+              end
+            end,
+            0,
+            ?TABLE).
+
+whitelist_all () ->
+  ets:foldl(fun ({K,_,_,_},A) ->
+              update_state_and_timestamp (K, created),
+              A + 1
+            end,
+            0,
+            ?TABLE).
+
+whitelist_prog_id (ProgId) ->
+  ProgIdBin = mondemand_util:binaryify(ProgId),
+  ets:foldl(fun ({K = {P,_,_,_,_},_,_,_},A) ->
+              case P =:= ProgIdBin of
+                true ->
+                  update_state_and_timestamp (K, created),
+                  A + 1;
+                false ->
+                  A
+              end
+            end,
+            0,
+            ?TABLE).
 
 %%====================================================================
 %% gen_server callbacks
@@ -271,4 +330,11 @@ load_cache (File) ->
                          [File, ProcessMillis]),
   Result.
 
+%%--------------------------------------------------------------------
+%%% Test functions
+%%--------------------------------------------------------------------
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
 
+
+-endif.
