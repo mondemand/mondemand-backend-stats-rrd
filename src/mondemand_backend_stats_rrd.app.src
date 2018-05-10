@@ -1,7 +1,7 @@
 { application, mondemand_backend_stats_rrd,
   [
     { description,"A plugin for the mondemand server to send stats to rrd via rrdcached"},
-    { vsn,"1.1.0"},
+    {vsn, {cmd, "/bin/bash -c 'awk \"match(\\$0, /[0-9]+\\.[0-9]+(\\.[0-9]+)+/){print substr(\\$0, RSTART,RLENGTH); exit}\" ChangeLog'"}},
     { modules,[]},
     { registered,[]},
     { applications, [kernel,stdlib,erlrrd,afunix]},
