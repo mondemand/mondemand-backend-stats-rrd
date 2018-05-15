@@ -49,7 +49,7 @@ process (Event) ->
   mondemand_backend_worker_pool_sup:process (?POOL, Event).
 
 required_apps () ->
-  [ lager, erlrrd ].
+  [ lager ].
 
 type () ->
   supervisor.
@@ -83,15 +83,6 @@ init ([Config]) ->
     {
       {one_for_one, 10, 10},
       [
-        { mondemand_backend_stats_rrd_builder,
-          { mondemand_backend_stats_rrd_builder, start_link,
-            []
-          },
-          permanent,
-          2000,
-          worker,
-          [ mondemand_backend_stats_rrd_builder]
-        },
         { mondemand_backend_stats_rrd_wblist,
           { mondemand_backend_stats_rrd_wblist, start_link,
            [WhitelistedProgIds, BlacklistedProgIds]
@@ -121,6 +112,19 @@ init ([Config]) ->
           permanent,
           2000,
           supervisor,
+          [ ]
+        },
+        { mdbes_rrd_builder_pool,
+          { mondemand_backend_worker_pool_sup, start_link,
+            [ mdbes_rrd_builder_pool,
+              mondemand_backend_worker,
+              Number,
+              mondemand_backend_stats_rrd_builder
+            ]
+          },
+          permanent,
+          2000,
+          worker,
           [ ]
         }
       ]

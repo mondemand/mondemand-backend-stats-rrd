@@ -5,6 +5,7 @@
          pending/1,
          forget/1,
          stats/0,
+         create/2,
          update/2,
          command_set_extra/2,
          command_get_extra/1,
@@ -15,6 +16,7 @@
          pending/2,
          forget/2,
          stats/1,
+         create/3,
          update/3,
          batch_start/1,
          batch_end/1
@@ -57,6 +59,11 @@ record_to_string (#command { action = forget,
   ["FORGET ", File, "\n"];
 record_to_string (#command { action = stats }) ->
   "STATS\n";
+record_to_string ( #command { action = create,
+                              file = File,
+                              values = List } )
+  when File =/= undefined, is_list (List) ->
+  lists:flatten ( ["CREATE ", File, " ", List, "\n" ] );
 record_to_string (#command { action = update,
                              file = File,
                              values = List })
@@ -72,6 +79,7 @@ flushall () -> #command { action = flushall }.
 pending (Filename) -> #command { action = pending, file = Filename }.
 forget (Filename) -> #command { action = forget, file = Filename }.
 stats () -> #command { action = stats }.
+create (Filename, Value) -> #command { action = create, file = Filename, values = Value }.
 update (Filename, Value) -> #command { action = update, file = Filename, values = Value }.
 batch_start () -> #command {action = batch_start}.
 batch_end () -> #command {action = batch_end}.
@@ -107,6 +115,8 @@ stats_results_to_proplist (StatsResults) ->
                [],
                StatsResults).
 
+create (Client, Filename, Value) ->
+  send_command (Client, create (Filename, Value)).
 update (Client, Filename, Value) ->
   send_command (Client, update (Filename, Value)).
 batch_start (Client) ->
@@ -298,6 +308,8 @@ parse_status_message ("stat failed with error 36.\n") ->
   {error, filenametoolong};
 parse_status_message ("illegal attempt to update using time " ++ _Time) ->
   {error, timestamp};
+parse_status_message ("Cannot create " ++ _File) ->
+  {error, permissiondenied};
 parse_status_message (Line) ->
   {error, {unknown, Line}}.
 
