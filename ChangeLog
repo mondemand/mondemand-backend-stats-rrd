@@ -1,3 +1,6 @@
+* Tue May 15 2018 Tim Whalen <whalen@oldbro.com> 1.2.0
+- replace erlrrd with rrdcached for rrd creation (requires rrdtool >= 1.6)
+
 * Fri May 11 2018 Anthony Molinaro <anthonym@alumni.caltech.edu> 1.1.1
 - bump version of mondemand-server
 

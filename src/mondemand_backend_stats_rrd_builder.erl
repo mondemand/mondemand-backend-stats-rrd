@@ -1,33 +1,34 @@
 -module (mondemand_backend_stats_rrd_builder).
 
--behaviour (gen_server).
+-behaviour (mondemand_backend_worker).
 
 -include ("mondemand_backend_stats_rrd_internal.hrl").
 
 %% API
--export ([ start_link/0,
-           calculate_context/3,
+-export ([ calculate_context/3,
            build/1
          ]).
 
-%% gen_server callbacks
--export ([ init/1,
-           handle_call/3,
-           handle_cast/2,
-           handle_info/2,
-           terminate/2,
-           code_change/3
-         ]).
+%% mondemand_backend_worker callbacks
+-export ([ create/1,
+           connected/1,
+           connect/1,
+           send/2,
+           destroy/1
+]).
 
--record (state, {}).
+-record (state, { connection_config,
+                  send_timeout,
+                  recv_timeout,
+                  connect_timeout,
+                  connection
+}).
+
 -define (NAME, mdbes_rrd_builder).
 
 %%====================================================================
 %% API
 %%====================================================================
-start_link () ->
-  gen_server:start_link ({local, ?NAME}, ?MODULE, [], []).
-
 calculate_context (Prefix, FileKey, Dirs) ->
   % normalize to binary to simplify rest of code
   ProgId = mondemand_util:binaryify (
@@ -87,43 +88,74 @@ calculate_context (Prefix, FileKey, Dirs) ->
   }.
 
 build (BuilderContext) ->
-  gen_server:cast (?NAME, {build, BuilderContext}).
+  mondemand_backend_worker_pool_sup:process (mdbes_rrd_builder_pool, { udp, 0, 0, 0, BuilderContext } ).
 
 %%====================================================================
-%% gen_server callbacks
+%% mondemand_backend_worker callbacks
 %%====================================================================
-init ([]) ->
-  { ok, #state {} }.
+create (Config) ->
+  ConnectionConfig =
+    case proplists:get_value (path, Config, undefined) of
+      undefined ->
+        Host = proplists:get_value (host, Config, "127.0.0.1"),
+        Port = proplists:get_value (port, Config, 11211),
+        {Host, Port};
+      Path ->
+        Path
+    end,
+  ConnectTimeout = proplists:get_value (connect_timeout, Config, 1000),
+  SendTimeout = proplists:get_value (send_timeout, Config, 100),
+  RecvTimeout = proplists:get_value (recv_timeout, Config, 50),
 
-handle_call (Request, From, State = #state {}) ->
-  error_logger:warning_msg ("~p : Unrecognized call ~p from ~p~n",
-                            [?MODULE, Request, From]),
-  { reply, ok, State }.
+  {ok, #state { connection_config = ConnectionConfig,
+                connect_timeout = ConnectTimeout,
+                send_timeout = SendTimeout,
+                recv_timeout = RecvTimeout,
+                connection = undefined
+              }}.
 
-handle_cast ({ build,
-               Context = #mdbes_rrd_builder_context { file_key = FileKey }
-             },
-             State = #state {}) ->
-  case maybe_create_files (Context) of
+connected (#state { connection = undefined }) -> false;
+connected (_) -> true.
+
+connect (State = #state { connection_config = ConnectionConfig,
+                          connect_timeout = ConnectTimeout,
+                          send_timeout = SendTimeout,
+                          recv_timeout = RecvTimeout
+                        }) ->
+  case rrdcached_client:open (ConnectionConfig, ConnectTimeout,
+                              SendTimeout, RecvTimeout) of
+    {ok, Client} ->
+      {ok, State#state { connection = Client }};
+    Error ->
+      {Error, State}
+  end.
+
+% TODO: replace this hack with better way to pass CREATE context
+% data to maybe_create_files.  Sample sys.config pool params:
+%
+%     { mondemand_backend_stats_rrd_builder,
+%       [
+%         { path, "/var/run/rrdcached/rrdcached.sock" },
+%         { worker_mod, mondemand_backend_stats_rrd_builder },
+%         { recv_timeout, infinity },
+%         { send_timeout, 5000 },
+%         { pass_raw_data, true }
+%       ]
+%     },
+%
+send (State = #state {connection = Client0}, {udp, _, _, _, 
+      Context = #mdbes_rrd_builder_context { file_key = FileKey }}) ->
+  case maybe_create_files (Client0, Context) of
     {ok, _} ->
-      mondemand_backend_stats_rrd_filecache:mark_created (FileKey);
+      mondemand_backend_stats_rrd_filecache:mark_created (FileKey),
+      {ok, State};
     E ->
-      mondemand_backend_stats_rrd_filecache:mark_error (FileKey, E)
-  end,
-  {noreply, State};
-handle_cast (Request, State = #state {}) ->
-  error_logger:warning_msg ("~p : Unrecognized cast ~p~n",[?MODULE, Request]),
-  { noreply, State }.
+      mondemand_backend_stats_rrd_filecache:mark_error (FileKey, E),
+      {error, State}
+  end.
 
-handle_info (Request, State = #state { }) ->
-  error_logger:warning_msg ("~p : Unrecognized info ~p~n",[?MODULE, Request]),
-  { noreply, State }.
-
-terminate (_Reason, #state {}) ->
-  ok.
-
-code_change (_OldVsn, State, _Extra) ->
-  { ok, State }.
+destroy (#state {connection = Client}) ->
+  rrdcached_client:close (Client).
 
 %%====================================================================
 %% internal functions
@@ -200,7 +232,8 @@ graphite_rrd_path (Prefix, ProgId,  MetricType, MetricName, Host, Context,
   FileName = list_to_binary ([atom_to_list (MetricType),".rrd"]),
   {FilePath, FileName}.
 
-maybe_create_files ( #mdbes_rrd_builder_context {
+maybe_create_files ( Client,
+                     #mdbes_rrd_builder_context {
                        metric_type = MetricType,
                        aggregated_type = AggregatedType,
                        legacy_rrd_file_dir = LegacyFileDir,
@@ -210,38 +243,31 @@ maybe_create_files ( #mdbes_rrd_builder_context {
                      } ) ->
   RRDFile = filename:join ([LegacyFileDir, LegacyFileName]),
 
-  case mondemand_server_util:mkdir_p (LegacyFileDir) of
-    ok ->
-      case maybe_create (MetricType, AggregatedType, RRDFile) of
-        {ok, _} ->
-          case mondemand_server_util:mkdir_p (GraphiteFileDir) of
-            ok ->
-              GRRDFile = filename:join ([GraphiteFileDir, GraphiteFileName]),
+  case maybe_create (Client, MetricType, AggregatedType, RRDFile) of
+    {ok, _} ->
+       {ok, RRDFile};
+    {_, {status, 0, _}} ->
+      case mondemand_server_util:mkdir_p (GraphiteFileDir) of
+        ok ->
+          GRRDFile = filename:join ([GraphiteFileDir, GraphiteFileName]),
 
-              % making symlinks for the moment
-              file:make_symlink (RRDFile, GRRDFile),
-              {ok, RRDFile};
-            E ->
-              {error, {cant_create_dir, GraphiteFileDir, E}}
-          end;
-        {timeout, Timeout} ->
-          error_logger:error_msg (
-            "Unable to create '~p' because of timeout ~p",[RRDFile, Timeout]),
-          {error, timeout};
-        {error, Error} ->
-          error_logger:error_msg (
-            "Unable to create '~p' because of ~p",[RRDFile, Error]),
-          {error, Error};
-        Unknown ->
-          error_logger:error_msg (
-            "Unable to create '~p' because of unknown ~p",[RRDFile, Unknown]),
-          {error, Unknown}
+          % making symlinks for the moment
+          file:make_symlink (RRDFile, GRRDFile),
+          {ok, RRDFile};
+        E ->
+          {error, {cant_create_dir, GraphiteFileDir, E}}
       end;
-    E2 ->
-      {error, {cant_create_dir, LegacyFileDir, E2}}
+    {_, {status, _, Error}} ->
+      error_logger:error_msg (
+        "Unable to create '~p' because of ~p",[RRDFile, Error]),
+      {error, Error};
+    Unknown ->
+      error_logger:error_msg (
+        "Unable to create '~p' because of unknown ~p",[RRDFile, Unknown]),
+      {error, Unknown}
   end.
 
-maybe_create (Types, AggregatedType, File) ->
+maybe_create (Client, Types, AggregatedType, File) ->
   {Type, SubType} =
      case Types of
        {T, S} -> {T, S};
@@ -252,38 +278,35 @@ maybe_create (Types, AggregatedType, File) ->
     {ok, I} -> {ok, I};
     _ ->
       case Type of
-        counter -> create_counter (File);
-        gauge -> create_gauge (File);
-        statset -> create_summary (SubType, AggregatedType, File);
-        _ -> create_counter (File) % default is counter
+        counter -> create_counter (Client, File);
+        gauge -> create_gauge (Client, File);
+        statset -> create_summary (Client, SubType, AggregatedType, File);
+        _ -> create_counter (Client, File) % default is counter
       end
   end.
 
-create_counter (File) ->
+create_rrd (Client, File, RRDType, DSMin, DaysMax) ->
   % creates an RRD file of 438120 bytes
-  erlrrd:create ([
-      io_lib:fwrite ("~s",[File]),
-      " --step \"60\""
-      " --start \"now - 90 days\""
-      " \"DS:value:DERIVE:900:0:U\""
-      " \"RRA:AVERAGE:0.5:1:44640\""  % 31 days of 1 minute samples
-      " \"RRA:AVERAGE:0.5:15:9600\""  % 100 days of 15 minute intervals
-      " \"RRA:AVERAGE:0.5:1440:400\"" % 400 day of 1 day intervals
-    ]).
+  TS = mondemand_server_util:seconds_since_epoch () - 60,
+  rrdcached_client:create ( Client, File, [
+      io_lib:fwrite ("-b ~B",[TS]),
+      " -s 60"
+      " -O",
+      io_lib:fwrite (" DS:value:~s:900:~s:U",[RRDType, DSMin]),
+      " RRA:AVERAGE:0.5:1:44640"  % 31 days of 1 minute samples
+      " RRA:AVERAGE:0.5:15:9600",  % 100 days of 15 minute intervals
+      io_lib:fwrite (" RRA:AVERAGE:0.5:1440:~s", [DaysMax]) % DaysMax days of 1 day intervals
+    ] ).
 
-create_gauge (File) ->
+create_counter (Client, File) ->
+  % creates an RRD file of 438120 bytes
+  create_rrd (Client, File, "DERIVE", "0", "400").
+
+create_gauge (Client, File) ->
   % creates an RRD file of 438128 bytes
-  erlrrd:create ([
-      io_lib:fwrite ("~s",[File]),
-      " --step \"60\""
-      " --start \"now - 90 days\""
-      " \"DS:value:GAUGE:900:U:U\""
-      " \"RRA:AVERAGE:0.5:1:44640\""  % 31 days of 1 minute samples
-      " \"RRA:AVERAGE:0.5:15:9600\""  % 100 days of 15 minute intervals
-      " \"RRA:AVERAGE:0.5:1440:400\"" % 400 days of 1 day intervals
-    ]).
+  create_rrd (Client, File, "GAUGE", "U", "400").
 
-create_summary (SubType, AggregatedType, File) ->
+create_summary (Client, SubType, AggregatedType, File) ->
   RRDType =
     case AggregatedType of
       % statset's being used direct from client
@@ -301,15 +324,7 @@ create_summary (SubType, AggregatedType, File) ->
       <<"gauge">> -> "GAUGE";
       _ -> "GAUGE"
     end,
-  erlrrd:create ([
-      io_lib:fwrite ("~s",[File]),
-      " --step \"60\""
-      " --start \"now - 90 days\"",
-      io_lib:fwrite (" \"DS:value:~s:900:U:U\"",[RRDType]),
-      " \"RRA:AVERAGE:0.5:1:44640\""   % 31 days of 1 minute samples
-      " \"RRA:AVERAGE:0.5:15:9600\""   % 100 days of 15 minute intervals
-      " \"RRA:AVERAGE:0.5:1440:1200\"" % 1200 days of 1 day intervals
-  ]).
+  create_rrd (Client, File, RRDType, "U", "1200").
 
 %%--------------------------------------------------------------------
 %%% Test functions
