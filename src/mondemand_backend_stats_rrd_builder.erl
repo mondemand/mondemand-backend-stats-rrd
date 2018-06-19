@@ -245,18 +245,9 @@ maybe_create_files ( Client,
 
   case maybe_create (Client, MetricType, AggregatedType, RRDFile) of
     {ok, _} ->
-       {ok, RRDFile};
+      maybe_create_softlink(GraphiteFileDir, GraphiteFileName, RRDFile);
     {_, {status, 0, _}} ->
-      case mondemand_server_util:mkdir_p (GraphiteFileDir) of
-        ok ->
-          GRRDFile = filename:join ([GraphiteFileDir, GraphiteFileName]),
-
-          % making symlinks for the moment
-          file:make_symlink (RRDFile, GRRDFile),
-          {ok, RRDFile};
-        E ->
-          {error, {cant_create_dir, GraphiteFileDir, E}}
-      end;
+      maybe_create_softlink(GraphiteFileDir, GraphiteFileName, RRDFile);
     {_, {status, _, Error}} ->
       error_logger:error_msg (
         "Unable to create '~p' because of ~p",[RRDFile, Error]),
@@ -265,6 +256,20 @@ maybe_create_files ( Client,
       error_logger:error_msg (
         "Unable to create '~p' because of unknown ~p",[RRDFile, Unknown]),
       {error, Unknown}
+  end.
+
+maybe_create_softlink(GraphiteFileDir, GraphiteFileName, RRDFile) ->
+  GRRDFile = filename:join ([GraphiteFileDir, GraphiteFileName]),
+  case file:read_file_info (GRRDFile) of
+    {ok, _} -> {ok, RRDFile};
+    _ ->
+      case mondemand_server_util:mkdir_p (GraphiteFileDir) of
+        ok ->
+          file:make_symlink (RRDFile, GRRDFile),
+          {ok, RRDFile};
+        E ->
+          {error, {cant_create_dir, GraphiteFileDir, E}}
+      end
   end.
 
 maybe_create (Client, Types, AggregatedType, File) ->

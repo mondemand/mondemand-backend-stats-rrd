@@ -1,3 +1,6 @@
+* Tue May 15 2018 Tim Whalen <whalen@oldbro.com> 1.2.1
+- maybe_create_files should verify graphite softlink even when rrd exists
+
 * Tue May 15 2018 Tim Whalen <whalen@oldbro.com> 1.2.0
 - replace erlrrd with rrdcached for rrd creation (requires rrdtool >= 1.6)
 
