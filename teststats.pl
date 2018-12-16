@@ -4,8 +4,8 @@ use strict;
 use warnings;
 
 my @ports = (0,
-             21512, 21512, 21512, 21512, 21512,
-             22522, 22522, 22522, 22522, 22522 );
+             26562, 26562, 26562, 26562, 26562,
+             26562, 26562, 26562, 26562, 26562 );
 my @counts= (0,
              0, 0, 0, 0, 0,
              0, 0, 0, 0, 0);
@@ -28,7 +28,7 @@ while(1) {
     $counts[$n] += $n * 10 * 60;
     $gauges[$n] = $n * 20;
     print "$date\t$port\t$host\tfoo\t$counts[$n]\tbar\t$gauges[$n]\n";
-    `mondemand-tool -o lwes::172.16.101.128:$port -c host:$host -s counter:foo:$counts[$n] -s gauge:bar:$gauges[$n]`;
+    `mondemand-tool -o lwes::0.0.0.0:$port -c host:$host -s counter:foo:$counts[$n] -s gauge:bar:$gauges[$n]`;
   }
   foreach my $l ([1,2,3,4,5], [6,7,8,9,10]) {
     my %s = ('foo' => \@counts, 'bar' => \@gauges);

@@ -21,7 +21,7 @@ getPid() {
 startRRDCached() {
   mkdir -p tmp/logs
   touch tmp/logs/rrdcached.log
-  rrdcached -b $cwd -l 127.0.0.1:11211 -s apache -f 7200 -w 3600 -p tmp/var/run/mondemand/rrdcached.pid -l unix:tmp/var/run/mondemand/rrdcached.sock -g 2>&1 >> tmp/logs/rrdcached.log &
+  rrdcached -b $cwd -B -R -l 127.0.0.1:11211 -s apache -f 7200 -w 3600 -p tmp/var/run/mondemand/rrdcached.pid -l unix:tmp/var/run/mondemand/rrdcached.sock -g  2>&1 >> tmp/logs/rrdcached.log &
 }
 
 if test -f $pidfile ; then
@@ -38,12 +38,13 @@ fi
 
 sleep 2
 
-erl \
-  -name md_server_$config -setcookie md_server \
-  $deps \
-  -pa ebin \
-  -config conf/mondemand_server_$config.config \
-  -eval "[ application:start(A) || A <- [syntax_tools, compiler, goldrush, lager ]], reloader:start(), mondemand_server_app:start()."
+CONFIG=conf/mondemand_server_$config.config
+
+rebar3 shell \
+  --config $CONFIG \
+  --setcookie md_server \
+  --name "md_server_$config" \
+  --apps "mondemand_server,mondemand_backend_stats_rrd"
 
 num_running=`ps auwwx | grep beam | grep md_server | grep -v grep | wc -l`
 if test $num_running -eq 0 -a -f $pidfile ; then

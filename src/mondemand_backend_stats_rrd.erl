@@ -49,7 +49,7 @@ process (Event) ->
   mondemand_backend_worker_pool_sup:process (?POOL, Event).
 
 required_apps () ->
-  [ lager ].
+  [ ].
 
 type () ->
   supervisor.

@@ -4,7 +4,7 @@
     {vsn, {cmd, "/bin/bash -c 'awk \"match(\\$0, /[0-9]+\\.[0-9]+(\\.[0-9]+)+/){print substr(\\$0, RSTART,RLENGTH); exit}\" ChangeLog'"}},
     { modules,[]},
     { registered,[]},
-    { applications, [kernel,stdlib,afunix]},
+    { applications, [kernel,stdlib,afunix,mondemand_server]},
     { env, [] }
   ]
 }.
