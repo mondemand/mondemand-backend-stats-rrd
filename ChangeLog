@@ -1,3 +1,7 @@
+* Sun Dec 16 2018 Anthony Molinaro <anthonym@alumni.caltech.edu> 1.3.1
+- minor rebar.config cleanup
+- minor dev server wrapper cleanup
+
 * Sat Dec 15 2018 Anthony Molinaro <anthonym@alumni.caltech.edu> 1.3.0
 - update deps
 - make sure builds with 20.x
